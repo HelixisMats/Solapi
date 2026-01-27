@@ -276,62 +276,272 @@ if uploaded is not None:
         thermal_loss_frac
     )
 
-    st.subheader(" DNI Hourly Profile (Input Data)")
-    st.table(hour_matrix_wh.style.format("{:.0f}"))
-
-    st.subheader(" Thermal Power Profile – Direct into Media [kW_th] (Heatmap)")
-    st.table(
-        hourly_direct_kw.style
-        .format("{:.1f}")
-        .set_properties(**{"line-height": "0.5rem", "padding": "1px"})
-        .background_gradient(cmap="YlOrRd", axis=0)
-    )
-
-    if thermal_loss_frac > 0:
-        st.subheader(" Thermal Power Profile – System after Loop [kW_th] (Heatmap)")
+    # ========================================
+    # SUMMARY SECTION (Always visible at top)
+    # ========================================
+    
+    st.markdown("---")
+    st.subheader("📊 Summary Results")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Annual Energy", f"{annual_system_kwh:,.0f} kWh")
+    with col2:
+        annual_value = annual_system_kwh * price_per_kwh
+        st.metric("Annual Value", f"{annual_value:,.0f} €")
+    with col3:
+        payback_years = system_cost / annual_value if annual_value > 0 else float("inf")
+        st.metric("Payback Period", f"{payback_years:.1f} years")
+    with col4:
+        total_units = needed_12_round + needed_24_round
+        st.metric("Total Units", f"{total_units}")
+    
+    # ========================================
+    # DETAILED RESULTS IN TABS
+    # ========================================
+    
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📈 Summary Report",
+        "🔥 Hourly Profiles", 
+        "📆 Monthly Data",
+        "📊 Input DNI Data",
+        "💾 Export"
+    ])
+    
+    # ========================================
+    # TAB 1: SUMMARY REPORT (Screenshot-friendly)
+    # ========================================
+    
+    with tab1:
+        st.markdown("### 📋 Complete System Summary")
+        st.markdown("*Perfect for screenshots and reports*")
+        
+        # System Configuration
+        st.markdown("#### ⚙️ System Configuration")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown(f"""
+            **Mirror Configuration:**
+            - Mirror area: {mirror_area:.2f} m²
+            - 12 m² units: {needed_12_round} units
+            - 24 m² units: {needed_24_round} units
+            - Peak thermal power @ 1000 W/m²: {design_peak_kw:.1f} kW
+            """)
+        
+        with col2:
+            st.markdown(f"""
+            **Performance Parameters:**
+            - Optical efficiency: {eta_opt_pct}%
+            - Thermal losses: {thermal_loss_pct}%
+            - Peak DNI: {hour_matrix_wh.max().max():.0f} W/m²
+            - Average thermal power: {target_peak_kw:.1f} kW
+            """)
+        
+        # Energy Production
+        st.markdown("#### 🔥 Energy Production")
+        energy_df = pd.DataFrame({
+            "Month": monthly_direct_kwh.index,
+            "Direct [kWh]": monthly_direct_kwh.values.round(0),
+            "System [kWh]": monthly_system_kwh.values.round(0)
+        })
+        st.dataframe(energy_df, use_container_width=True, hide_index=True)
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("**Annual Direct Energy**", f"{annual_direct_kwh:,.0f} kWh/year")
+        with col2:
+            st.metric("**Annual System Energy**", f"{annual_system_kwh:,.0f} kWh/year")
+        
+        # Economics
+        st.markdown("#### 💰 Economic Analysis")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.markdown(f"""
+            **Costs:**
+            - Product cost: {total_product_cost:,.0f} €
+            - Installation: {installation_cost:,.0f} €
+            - **Total system cost: {system_cost:,.0f} €**
+            """)
+        
+        with col2:
+            st.markdown(f"""
+            **Revenue:**
+            - Energy price: {price_per_kwh:.2f} €/kWh
+            - Annual production: {annual_system_kwh:,.0f} kWh
+            - **Annual value: {annual_value:,.0f} €**
+            """)
+        
+        with col3:
+            st.markdown(f"""
+            **Return on Investment:**
+            - Payback period: **{payback_years:.1f} years**
+            - Annual ROI: **{(annual_value/system_cost*100):.1f}%**
+            - 20-year value: **{(annual_value*20):,.0f} €**
+            """)
+    
+    # ========================================
+    # TAB 2: HOURLY PROFILES
+    # ========================================
+    
+    with tab2:
+        st.markdown("### 🔥 Hourly Thermal Power Profiles")
+        
+        # Direct Power Profile
+        st.markdown("#### Direct Power into Media [kW_th]")
         st.table(
-            hourly_system_kw.style
+            hourly_direct_kw.style
             .format("{:.1f}")
-            .set_properties(**{"line-height": "0.5rem", "padding": "1px"})
+            .set_properties(**{"line-height": "0.5rem", "padding": "2px", "font-size": "11px"})
             .background_gradient(cmap="YlOrRd", axis=0)
         )
+        
+        # System Power Profile (if losses exist)
+        if thermal_loss_frac > 0:
+            st.markdown("#### System Power after Loop [kW_th]")
+            st.table(
+                hourly_system_kw.style
+                .format("{:.1f}")
+                .set_properties(**{"line-height": "0.5rem", "padding": "2px", "font-size": "11px"})
+                .background_gradient(cmap="YlOrRd", axis=0)
+            )
+        
+        # Daily Summary
+        st.markdown("#### 📊 Daily Energy Totals [kWh/day]")
+        daily_df = pd.DataFrame({
+            "Month": daily_direct_kwh.index,
+            "Direct [kWh]": daily_direct_kwh.values.round(1),
+            "System [kWh]": daily_system_kwh.values.round(1)
+        })
+        st.dataframe(daily_df, use_container_width=True, hide_index=True)
+    
+    # ========================================
+    # TAB 3: MONTHLY DATA
+    # ========================================
+    
+    with tab3:
+        st.markdown("### 📆 Monthly Production Summary")
+        
+        # Monthly table with more details
+        monthly_detailed = pd.DataFrame({
+            "Month": monthly_direct_kwh.index,
+            "Direct Energy [kWh]": monthly_direct_kwh.values.round(0),
+            "System Energy [kWh]": monthly_system_kwh.values.round(0),
+            "Economic Value [€]": (monthly_system_kwh.values * price_per_kwh).round(0)
+        })
+        
+        st.dataframe(monthly_detailed, use_container_width=True, hide_index=True)
+        
+        # Annual totals
+        st.markdown("---")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Annual Direct Energy", f"{annual_direct_kwh:,.0f} kWh")
+        with col2:
+            st.metric("Annual System Energy", f"{annual_system_kwh:,.0f} kWh")
+        with col3:
+            st.metric("Annual Economic Value", f"{annual_value:,.0f} €")
+    
+    # ========================================
+    # TAB 4: INPUT DNI DATA
+    # ========================================
+    
+    with tab4:
+        st.markdown("### ☀️ Input DNI Hourly Profile [W/m²]")
+        st.markdown("*Source data from Global Solar Atlas*")
+        
+        st.table(
+            hour_matrix_wh.style
+            .format("{:.0f}")
+            .set_properties(**{"line-height": "0.5rem", "padding": "2px", "font-size": "11px"})
+            .background_gradient(cmap="YlOrBr", axis=0)
+        )
+        
+        # DNI statistics
+        st.markdown("#### 📊 DNI Statistics")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Peak DNI", f"{hour_matrix_wh.max().max():.0f} W/m²")
+        with col2:
+            st.metric("Average DNI", f"{hour_matrix_wh.mean().mean():.0f} W/m²")
+        with col3:
+            st.metric("Annual DNI", f"{annual_kwh_m2:.0f} kWh/m²")
+        with col4:
+            best_month = monthly_kwh_m2.idxmax()
+            st.metric("Best Month", best_month)
+    
+    # ========================================
+    # TAB 5: EXPORT & DOWNLOADS
+    # ========================================
+    
+    with tab5:
+        st.markdown("### 💾 Export Results")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("#### Monthly Production")
+            st.download_button(
+                "📥 Download Monthly Data (CSV)",
+                monthly_system_kwh.to_csv().encode("utf-8"),
+                "helixis_monthly_production.csv",
+                "text/csv",
+                use_container_width=True
+            )
+            
+            st.markdown("#### Hourly Profiles")
+            st.download_button(
+                "📥 Download Hourly Power (CSV)",
+                hourly_system_kw.to_csv().encode("utf-8"),
+                "helixis_hourly_power.csv",
+                "text/csv",
+                use_container_width=True
+            )
+        
+        with col2:
+            st.markdown("#### Complete Report")
+            # Create summary text file
+            summary_text = f"""
+HELIXIS SOLAR CONCENTRATOR - PRODUCTION ESTIMATE
+================================================
 
-    st.subheader("🔥 Estimated Daily Thermal Energy [kWh/day]")
-    st.table(
-        pd.DataFrame({
-            "Direct": daily_direct_kwh,
-            "System": daily_system_kwh
-        }).round(1)
-    )
+SYSTEM CONFIGURATION
+--------------------
+Mirror area: {mirror_area:.2f} m²
+12 m² units: {needed_12_round}
+24 m² units: {needed_24_round}
+Optical efficiency: {eta_opt_pct}%
+Thermal losses: {thermal_loss_pct}%
 
-    st.subheader("📆 Monthly and Annual Thermal Energy [kWh]")
-    st.table(
-        pd.DataFrame({
-            "Direct": monthly_direct_kwh,
-            "System": monthly_system_kwh
-        }).round(0)
-    )
+ENERGY PRODUCTION
+-----------------
+Annual direct: {annual_direct_kwh:,.0f} kWh/year
+Annual system: {annual_system_kwh:,.0f} kWh/year
 
-    st.metric("Annual direct thermal energy [kWh/year]", f"{annual_direct_kwh:,.0f}")
-    st.metric("Annual system thermal energy [kWh/year]", f"{annual_system_kwh:,.0f}")
+ECONOMICS
+---------
+System cost: {system_cost:,.0f} €
+Energy price: {price_per_kwh:.2f} €/kWh
+Annual value: {annual_value:,.0f} €
+Payback period: {payback_years:.1f} years
 
-    annual_value = annual_system_kwh * price_per_kwh
-    payback_years = system_cost / annual_value if annual_value > 0 else float("inf")
-
-    st.subheader("💰 Economic Evaluation")
-    st.metric("Annual economic value [€]", f"{annual_value:,.0f}")
-    st.metric("Estimated payback period [years]", f"{payback_years:,.1f}")
-
-    st.subheader("🛰️ Required Number of Concentrators")
-    st.write(f"**12 m² units needed:** {needed_12_round} _(exact: {needed_12_exact:.2f})_")
-    st.write(f"**24 m² units needed:** {needed_24_round} _(exact: {needed_24_exact:.2f})_")
-
-    st.download_button(
-        "📥 Download monthly thermal production (CSV)",
-        monthly_system_kwh.to_csv().encode("utf-8"),
-        "thermal_monthly_production.csv",
-        "text/csv",
-    )
+MONTHLY PRODUCTION (kWh)
+------------------------
+{monthly_system_kwh.to_string()}
+            """
+            
+            st.download_button(
+                "📄 Download Summary Report (TXT)",
+                summary_text.encode("utf-8"),
+                "helixis_summary_report.txt",
+                "text/plain",
+                use_container_width=True
+            )
+    
+    st.markdown("---")
+    st.markdown("*Helixis Solar Concentrator Calculator - Results generated: " + 
+                pd.Timestamp.now().strftime("%Y-%m-%d %H:%M") + "*")
 
 else:
     st.info("Upload a GSA Excel report file to continue.")
