@@ -307,7 +307,11 @@ if uploaded is not None:
     st.markdown("---")
     st.subheader("📊 Summary Results")
     
-    col1, col2, col3, col4 = st.columns(4)
+    # Calculate lifecycle metrics
+    total_20yr_production = annual_system_kwh * 20
+    cost_per_kwh_20yr = system_cost / total_20yr_production if total_20yr_production > 0 else 0
+    
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         st.metric("Annual Energy", f"{annual_system_kwh:,.0f} kWh")
     with col2:
@@ -317,6 +321,8 @@ if uploaded is not None:
         payback_years = system_cost / annual_value if annual_value > 0 else float("inf")
         st.metric("Payback Period", f"{payback_years:.1f} years")
     with col4:
+        st.metric("Cost per kWh (20yr)", f"{cost_per_kwh_20yr:.3f} €")
+    with col5:
         st.metric("Total Units", f"{actual_units}")
     
     # ========================================
@@ -389,20 +395,39 @@ if uploaded is not None:
             """)
         
         with col2:
+            # Calculate 20-year totals
+            total_20yr_production = annual_system_kwh * 20
+            total_20yr_value = annual_value * 20
+            
             st.markdown(f"""
             **Revenue:**
             - Energy price: {price_per_kwh:.2f} €/kWh
             - Annual production: {annual_system_kwh:,.0f} kWh
             - **Annual value: {annual_value:,.0f} €**
+            - 20-year production: {total_20yr_production:,.0f} kWh
+            - **20-year value: {total_20yr_value:,.0f} €**
             """)
         
         with col3:
+            # Calculate lifecycle cost per kWh
+            total_20yr_production = annual_system_kwh * 20
+            cost_per_kwh_20yr = system_cost / total_20yr_production if total_20yr_production > 0 else 0
+            
             st.markdown(f"""
             **Return on Investment:**
             - Payback period: **{payback_years:.1f} years**
             - Annual ROI: **{(annual_value/system_cost*100):.1f}%**
-            - 20-year value: **{(annual_value*20):,.0f} €**
+            - **Lifecycle cost: {cost_per_kwh_20yr:.3f} €/kWh** (20 years)
+            - Net profit (20 yr): **{(total_20yr_value - system_cost):,.0f} €**
             """)
+        
+        # Add comparison box
+        st.markdown("---")
+        st.info(f"""
+        💡 **Economic Summary:** Over 20 years, this system produces thermal energy at **{cost_per_kwh_20yr:.3f} €/kWh** 
+        (system cost divided by total production). Compared to purchasing energy at **{price_per_kwh:.2f} €/kWh**, 
+        you save **{(price_per_kwh - cost_per_kwh_20yr):.3f} €/kWh** or **{((price_per_kwh - cost_per_kwh_20yr)/price_per_kwh*100):.1f}%** per kWh produced.
+        """)
     
     # ========================================
     # TAB 2: HOURLY PROFILES
