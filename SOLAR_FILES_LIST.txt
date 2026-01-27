@@ -1,0 +1,77 @@
+# ☀️ HELIXIS SOLAR CALCULATOR - DEPLOYMENT FILES
+
+## 📦 Files to Download and Upload to GitHub:
+
+### REQUIRED FILES (Must have):
+
+1. **solar_dni_thermal_app_final.py** ⭐ MAIN APP FILE
+   - The password-protected application
+   - Upload with this exact name
+
+2. **requirements.txt** 
+   - Python dependencies
+   - Make sure it contains:
+     streamlit>=1.28.0
+     pandas>=2.0.0
+     numpy>=1.24.0
+     openpyxl>=3.1.0
+
+3. **.gitignore**
+   - Protects your secrets
+   - Name MUST start with dot: .gitignore
+
+### OPTIONAL FILES (Helpful):
+
+4. **README.md**
+   - Documentation for your repo
+   - Choose: SOLAR_README.md and rename to README.md
+
+5. **DEPLOYMENT.md**
+   - Detailed deployment instructions
+   - Choose: SOLAR_DEPLOYMENT.md and rename to DEPLOYMENT.md
+
+6. **secrets.toml.example**
+   - Template for passwords (don't upload the actual secrets!)
+   - Choose: secrets.toml.example
+
+---
+
+## 🚀 QUICK START:
+
+### Step 1: Download These Files
+Click the download links above to save each file to your computer.
+
+### Step 2: Create GitHub Repository
+- Go to https://github.com/new
+- Name: helixis-solar-calculator
+- Visibility: Public (for free Streamlit hosting)
+- Click "Create repository"
+
+### Step 3: Upload Files
+- Click "Add file" → "Upload files"
+- Drag and drop all downloaded files
+- Click "Commit changes"
+
+### Step 4: Deploy on Streamlit
+- Go to https://share.streamlit.io/deploy
+- Repository: YourUsername/helixis-solar-calculator
+- Branch: main
+- Main file: solar_dni_thermal_app_final.py
+- Click "Deploy!"
+
+### Step 5: Add Passwords
+In Streamlit dashboard → Settings → Secrets:
+```
+[passwords]
+admin = "YourSecurePassword123"
+client1 = "ClientPass456"
+```
+
+### Step 6: Test!
+- Go to your app URL
+- Login with admin credentials
+- Upload a Global Solar Atlas Excel file
+
+---
+
+DONE! Your app is live and password-protected! 🎉
