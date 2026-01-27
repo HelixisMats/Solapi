@@ -232,6 +232,29 @@ if uploaded is not None:
             mirror_area = n12 * APERTURE_12 + n24 * APERTURE_24
             target_peak_kw = mirror_area * peak_kw_per_m2
 
+        # Calculate actual units needed based on mode
+        if base_mode == "Number of 12 m² units":
+            actual_units = n12
+        elif base_mode == "Number of 24 m² units":
+            actual_units = n24
+        elif base_mode == "Mix of 12 m² + 24 m² units":
+            actual_units = n12 + n24
+        else:
+            # For "Peak thermal power" or "Mirror surface" modes,
+            # calculate most efficient unit configuration
+            # Option 1: Use only 12 m² units
+            cost_12_only = math.ceil(mirror_area / APERTURE_12)
+            # Option 2: Use only 24 m² units
+            cost_24_only = math.ceil(mirror_area / APERTURE_24)
+            # Choose most efficient (fewer units)
+            if cost_24_only <= cost_12_only:
+                actual_units = cost_24_only
+                actual_unit_type = "24 m²"
+            else:
+                actual_units = cost_12_only
+                actual_unit_type = "12 m²"
+        
+        # Still calculate theoretical needs for reference
         needed_12_exact = mirror_area / APERTURE_12
         needed_24_exact = mirror_area / APERTURE_24
         needed_12_round = math.ceil(needed_12_exact)
@@ -251,10 +274,11 @@ if uploaded is not None:
         item_cost_per_unit = st.number_input("Product cost [€ / unit]", min_value=0.0, value=15000.0)
         installation_cost = st.number_input("Estimated installation cost [€]", min_value=0.0, value=20000.0)
 
-        total_units = needed_12_round + needed_24_round
-        total_product_cost = total_units * item_cost_per_unit
+        # Use actual units for cost calculation
+        total_product_cost = actual_units * item_cost_per_unit
         system_cost = total_product_cost + installation_cost
 
+        st.metric("Units used in calculation", f"{actual_units}")
         st.metric("Total product cost [€]", f"{total_product_cost:,.0f}")
         st.metric("Total system cost [€]", f"{system_cost:,.0f}")
 
@@ -293,8 +317,7 @@ if uploaded is not None:
         payback_years = system_cost / annual_value if annual_value > 0 else float("inf")
         st.metric("Payback Period", f"{payback_years:.1f} years")
     with col4:
-        total_units = needed_12_round + needed_24_round
-        st.metric("Total Units", f"{total_units}")
+        st.metric("Total Units", f"{actual_units}")
     
     # ========================================
     # DETAILED RESULTS IN TABS
