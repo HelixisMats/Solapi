@@ -16,11 +16,19 @@ def check_password():
     
     def password_entered():
         """Checks if entered password is correct."""
-        username = st.session_state.get("username", "")
-        password = st.session_state.get("password", "")
+        username = st.session_state.get("username", "").strip()
+        password = st.session_state.get("password", "").strip()
+        
+        # CRITICAL: Require non-empty username and password
+        if not username or not password:
+            st.session_state["password_correct"] = False
+            st.session_state["login_error"] = "Username and password are required"
+            return
         
         # Check if secrets exist
         if "passwords" not in st.secrets:
+            # Demo mode only if no secrets configured
+            st.warning("⚠️ No passwords configured - running in demo mode")
             st.session_state["password_correct"] = True
             st.session_state["current_user"] = "demo"
             return
@@ -30,6 +38,7 @@ def check_password():
             if password == st.secrets["passwords"][username]:
                 st.session_state["password_correct"] = True
                 st.session_state["current_user"] = username
+                st.session_state["login_error"] = None
                 # Remove password from session state
                 if "password" in st.session_state:
                     del st.session_state["password"]
@@ -37,8 +46,10 @@ def check_password():
                     del st.session_state["username"]
             else:
                 st.session_state["password_correct"] = False
+                st.session_state["login_error"] = "Incorrect password"
         else:
             st.session_state["password_correct"] = False
+            st.session_state["login_error"] = "Username not found"
     
     # First run - show login
     if "password_correct" not in st.session_state:
@@ -50,9 +61,11 @@ def check_password():
             st.text_input("Username", key="username", placeholder="Enter username")
             st.text_input("Password", type="password", key="password", placeholder="Enter password")
             st.button("🔓 Login", on_click=password_entered, type="primary", use_container_width=True)
+            
+            # Show error if exists
+            if "login_error" in st.session_state and st.session_state["login_error"]:
+                st.error(f"❌ {st.session_state['login_error']}")
         
-        st.markdown("---")
-        st.info("💡 **Demo mode**: If no passwords are configured, you can access the system directly.")
         return False
     
     # Incorrect password
@@ -65,7 +78,12 @@ def check_password():
             st.text_input("Username", key="username", placeholder="Enter username")
             st.text_input("Password", type="password", key="password", placeholder="Enter password")
             st.button("🔓 Login", on_click=password_entered, type="primary", use_container_width=True)
-            st.error("❌ Incorrect username or password")
+            
+            # Show specific error message
+            if "login_error" in st.session_state and st.session_state["login_error"]:
+                st.error(f"❌ {st.session_state['login_error']}")
+            else:
+                st.error("❌ Incorrect username or password")
         return False
     
     # Correct password
@@ -87,6 +105,7 @@ MONTHS = list(DAYS_IN_MONTH.keys())
 
 APERTURE_12 = 12.35
 APERTURE_24 = 24.7
+APERTURE_36 = 37.05
 DESIGN_DNI_W_M2 = 1000.0
 
 # -------------------------------------------------
@@ -185,7 +204,8 @@ with st.sidebar:
             "Mirror surface (m²)",
             "Number of 12 m² units",
             "Number of 24 m² units",
-            "Mix of 12 m² + 24 m² units",
+            "Number of 36 m² units",
+            "Mix of 12 m² + 24 m² + 36 m² units",
         ]
     )
 
@@ -207,6 +227,7 @@ if uploaded is not None:
 
         n12 = 0
         n24 = 0
+        n36 = 0
 
         if base_mode == "Peak thermal power (kW)":
             target_peak_kw = st.number_input("Target peak power [kW]", min_value=0.1, value=100.0)
@@ -226,10 +247,16 @@ if uploaded is not None:
             mirror_area = n24 * APERTURE_24
             target_peak_kw = mirror_area * peak_kw_per_m2
 
-        elif base_mode == "Mix of 12 m² + 24 m² units":
-            n12 = st.number_input("Number of 12 m² units", min_value=0, value=1)
-            n24 = st.number_input("Number of 24 m² units", min_value=0, value=1)
-            mirror_area = n12 * APERTURE_12 + n24 * APERTURE_24
+        elif base_mode == "Number of 36 m² units":
+            n36 = st.number_input("Number of 36 m² units", min_value=0, value=1)
+            mirror_area = n36 * APERTURE_36
+            target_peak_kw = mirror_area * peak_kw_per_m2
+
+        elif base_mode == "Mix of 12 m² + 24 m² + 36 m² units":
+            n12 = st.number_input("Number of 12 m² units", min_value=0, value=0)
+            n24 = st.number_input("Number of 24 m² units", min_value=0, value=0)
+            n36 = st.number_input("Number of 36 m² units", min_value=0, value=1)
+            mirror_area = n12 * APERTURE_12 + n24 * APERTURE_24 + n36 * APERTURE_36
             target_peak_kw = mirror_area * peak_kw_per_m2
 
         # Calculate actual units needed based on mode
@@ -237,8 +264,10 @@ if uploaded is not None:
             actual_units = n12
         elif base_mode == "Number of 24 m² units":
             actual_units = n24
-        elif base_mode == "Mix of 12 m² + 24 m² units":
-            actual_units = n12 + n24
+        elif base_mode == "Number of 36 m² units":
+            actual_units = n36
+        elif base_mode == "Mix of 12 m² + 24 m² + 36 m² units":
+            actual_units = n12 + n24 + n36
         else:
             # For "Peak thermal power" or "Mirror surface" modes,
             # calculate most efficient unit configuration
@@ -246,8 +275,14 @@ if uploaded is not None:
             cost_12_only = math.ceil(mirror_area / APERTURE_12)
             # Option 2: Use only 24 m² units
             cost_24_only = math.ceil(mirror_area / APERTURE_24)
+            # Option 3: Use only 36 m² units
+            cost_36_only = math.ceil(mirror_area / APERTURE_36)
             # Choose most efficient (fewer units)
-            if cost_24_only <= cost_12_only:
+            min_units = min(cost_12_only, cost_24_only, cost_36_only)
+            if min_units == cost_36_only:
+                actual_units = cost_36_only
+                actual_unit_type = "36 m²"
+            elif min_units == cost_24_only:
                 actual_units = cost_24_only
                 actual_unit_type = "24 m²"
             else:
@@ -257,8 +292,10 @@ if uploaded is not None:
         # Still calculate theoretical needs for reference
         needed_12_exact = mirror_area / APERTURE_12
         needed_24_exact = mirror_area / APERTURE_24
+        needed_36_exact = mirror_area / APERTURE_36
         needed_12_round = math.ceil(needed_12_exact)
         needed_24_round = math.ceil(needed_24_exact)
+        needed_36_round = math.ceil(needed_36_exact)
 
         design_peak_kw = mirror_area * (DESIGN_DNI_W_M2 / 1000.0) * eta_opt
 
@@ -353,6 +390,7 @@ if uploaded is not None:
             - Mirror area: {mirror_area:.2f} m²
             - 12 m² units: {needed_12_round} units
             - 24 m² units: {needed_24_round} units
+            - 36 m² units: {needed_36_round} units
             - Peak thermal power @ 1000 W/m²: {design_peak_kw:.1f} kW
             """)
         
@@ -557,6 +595,7 @@ SYSTEM CONFIGURATION
 Mirror area: {mirror_area:.2f} m²
 12 m² units: {needed_12_round}
 24 m² units: {needed_24_round}
+36 m² units: {needed_36_round}
 Optical efficiency: {eta_opt_pct}%
 Thermal losses: {thermal_loss_pct}%
 
