@@ -307,23 +307,21 @@ if uploaded is not None:
     st.markdown("---")
     st.subheader("📊 Summary Results")
     
-    # Calculate lifecycle metrics
+    # Calculate key metrics
+    annual_value = annual_system_kwh * price_per_kwh
+    payback_years = system_cost / annual_value if annual_value > 0 else float("inf")
     total_20yr_production = annual_system_kwh * 20
     cost_per_kwh_20yr = system_cost / total_20yr_production if total_20yr_production > 0 else 0
     
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Annual Energy", f"{annual_system_kwh:,.0f} kWh")
     with col2:
-        annual_value = annual_system_kwh * price_per_kwh
         st.metric("Annual Value", f"{annual_value:,.0f} €")
     with col3:
-        payback_years = system_cost / annual_value if annual_value > 0 else float("inf")
         st.metric("Payback Period", f"{payback_years:.1f} years")
     with col4:
-        st.metric("Cost per kWh (20yr)", f"{cost_per_kwh_20yr:.3f} €")
-    with col5:
-        st.metric("Total Units", f"{actual_units}")
+        st.metric("Lifecycle Cost", f"{cost_per_kwh_20yr:.3f} €/kWh")
     
     # ========================================
     # DETAILED RESULTS IN TABS
