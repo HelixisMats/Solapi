@@ -16,19 +16,11 @@ def check_password():
     
     def password_entered():
         """Checks if entered password is correct."""
-        username = st.session_state.get("username", "").strip()
-        password = st.session_state.get("password", "").strip()
-        
-        # CRITICAL: Require non-empty username and password
-        if not username or not password:
-            st.session_state["password_correct"] = False
-            st.session_state["login_error"] = "Username and password are required"
-            return
+        username = st.session_state.get("username", "")
+        password = st.session_state.get("password", "")
         
         # Check if secrets exist
         if "passwords" not in st.secrets:
-            # Demo mode only if no secrets configured
-            st.warning("⚠️ No passwords configured - running in demo mode")
             st.session_state["password_correct"] = True
             st.session_state["current_user"] = "demo"
             return
@@ -38,7 +30,6 @@ def check_password():
             if password == st.secrets["passwords"][username]:
                 st.session_state["password_correct"] = True
                 st.session_state["current_user"] = username
-                st.session_state["login_error"] = None
                 # Remove password from session state
                 if "password" in st.session_state:
                     del st.session_state["password"]
@@ -46,10 +37,8 @@ def check_password():
                     del st.session_state["username"]
             else:
                 st.session_state["password_correct"] = False
-                st.session_state["login_error"] = "Incorrect password"
         else:
             st.session_state["password_correct"] = False
-            st.session_state["login_error"] = "Username not found"
     
     # First run - show login
     if "password_correct" not in st.session_state:
@@ -61,11 +50,9 @@ def check_password():
             st.text_input("Username", key="username", placeholder="Enter username")
             st.text_input("Password", type="password", key="password", placeholder="Enter password")
             st.button("🔓 Login", on_click=password_entered, type="primary", use_container_width=True)
-            
-            # Show error if exists
-            if "login_error" in st.session_state and st.session_state["login_error"]:
-                st.error(f"❌ {st.session_state['login_error']}")
         
+        st.markdown("---")
+        st.info("💡 **Demo mode**: If no passwords are configured, you can access the system directly.")
         return False
     
     # Incorrect password
@@ -78,12 +65,7 @@ def check_password():
             st.text_input("Username", key="username", placeholder="Enter username")
             st.text_input("Password", type="password", key="password", placeholder="Enter password")
             st.button("🔓 Login", on_click=password_entered, type="primary", use_container_width=True)
-            
-            # Show specific error message
-            if "login_error" in st.session_state and st.session_state["login_error"]:
-                st.error(f"❌ {st.session_state['login_error']}")
-            else:
-                st.error("❌ Incorrect username or password")
+            st.error("❌ Incorrect username or password")
         return False
     
     # Correct password
@@ -105,7 +87,6 @@ MONTHS = list(DAYS_IN_MONTH.keys())
 
 APERTURE_12 = 12.35
 APERTURE_24 = 24.7
-APERTURE_36 = 37.05
 DESIGN_DNI_W_M2 = 1000.0
 
 # -------------------------------------------------
@@ -204,8 +185,7 @@ with st.sidebar:
             "Mirror surface (m²)",
             "Number of 12 m² units",
             "Number of 24 m² units",
-            "Number of 36 m² units",
-            "Mix of 12 m² + 24 m² + 36 m² units",
+            "Mix of 12 m² + 24 m² units",
         ]
     )
 
@@ -227,7 +207,6 @@ if uploaded is not None:
 
         n12 = 0
         n24 = 0
-        n36 = 0
 
         if base_mode == "Peak thermal power (kW)":
             target_peak_kw = st.number_input("Target peak power [kW]", min_value=0.1, value=100.0)
@@ -247,55 +226,16 @@ if uploaded is not None:
             mirror_area = n24 * APERTURE_24
             target_peak_kw = mirror_area * peak_kw_per_m2
 
-        elif base_mode == "Number of 36 m² units":
-            n36 = st.number_input("Number of 36 m² units", min_value=0, value=1)
-            mirror_area = n36 * APERTURE_36
+        elif base_mode == "Mix of 12 m² + 24 m² units":
+            n12 = st.number_input("Number of 12 m² units", min_value=0, value=1)
+            n24 = st.number_input("Number of 24 m² units", min_value=0, value=1)
+            mirror_area = n12 * APERTURE_12 + n24 * APERTURE_24
             target_peak_kw = mirror_area * peak_kw_per_m2
 
-        elif base_mode == "Mix of 12 m² + 24 m² + 36 m² units":
-            n12 = st.number_input("Number of 12 m² units", min_value=0, value=0)
-            n24 = st.number_input("Number of 24 m² units", min_value=0, value=0)
-            n36 = st.number_input("Number of 36 m² units", min_value=0, value=1)
-            mirror_area = n12 * APERTURE_12 + n24 * APERTURE_24 + n36 * APERTURE_36
-            target_peak_kw = mirror_area * peak_kw_per_m2
-
-        # Calculate actual units needed based on mode
-        if base_mode == "Number of 12 m² units":
-            actual_units = n12
-        elif base_mode == "Number of 24 m² units":
-            actual_units = n24
-        elif base_mode == "Number of 36 m² units":
-            actual_units = n36
-        elif base_mode == "Mix of 12 m² + 24 m² + 36 m² units":
-            actual_units = n12 + n24 + n36
-        else:
-            # For "Peak thermal power" or "Mirror surface" modes,
-            # calculate most efficient unit configuration
-            # Option 1: Use only 12 m² units
-            cost_12_only = math.ceil(mirror_area / APERTURE_12)
-            # Option 2: Use only 24 m² units
-            cost_24_only = math.ceil(mirror_area / APERTURE_24)
-            # Option 3: Use only 36 m² units
-            cost_36_only = math.ceil(mirror_area / APERTURE_36)
-            # Choose most efficient (fewer units)
-            min_units = min(cost_12_only, cost_24_only, cost_36_only)
-            if min_units == cost_36_only:
-                actual_units = cost_36_only
-                actual_unit_type = "36 m²"
-            elif min_units == cost_24_only:
-                actual_units = cost_24_only
-                actual_unit_type = "24 m²"
-            else:
-                actual_units = cost_12_only
-                actual_unit_type = "12 m²"
-        
-        # Still calculate theoretical needs for reference
         needed_12_exact = mirror_area / APERTURE_12
         needed_24_exact = mirror_area / APERTURE_24
-        needed_36_exact = mirror_area / APERTURE_36
         needed_12_round = math.ceil(needed_12_exact)
         needed_24_round = math.ceil(needed_24_exact)
-        needed_36_round = math.ceil(needed_36_exact)
 
         design_peak_kw = mirror_area * (DESIGN_DNI_W_M2 / 1000.0) * eta_opt
 
@@ -311,11 +251,10 @@ if uploaded is not None:
         item_cost_per_unit = st.number_input("Product cost [€ / unit]", min_value=0.0, value=15000.0)
         installation_cost = st.number_input("Estimated installation cost [€]", min_value=0.0, value=20000.0)
 
-        # Use actual units for cost calculation
-        total_product_cost = actual_units * item_cost_per_unit
+        total_units = needed_12_round + needed_24_round
+        total_product_cost = total_units * item_cost_per_unit
         system_cost = total_product_cost + installation_cost
 
-        st.metric("Units used in calculation", f"{actual_units}")
         st.metric("Total product cost [€]", f"{total_product_cost:,.0f}")
         st.metric("Total system cost [€]", f"{system_cost:,.0f}")
 
@@ -344,21 +283,18 @@ if uploaded is not None:
     st.markdown("---")
     st.subheader("📊 Summary Results")
     
-    # Calculate key metrics
-    annual_value = annual_system_kwh * price_per_kwh
-    payback_years = system_cost / annual_value if annual_value > 0 else float("inf")
-    total_20yr_production = annual_system_kwh * 20
-    cost_per_kwh_20yr = system_cost / total_20yr_production if total_20yr_production > 0 else 0
-    
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Annual Energy", f"{annual_system_kwh:,.0f} kWh")
     with col2:
+        annual_value = annual_system_kwh * price_per_kwh
         st.metric("Annual Value", f"{annual_value:,.0f} €")
     with col3:
+        payback_years = system_cost / annual_value if annual_value > 0 else float("inf")
         st.metric("Payback Period", f"{payback_years:.1f} years")
     with col4:
-        st.metric("Lifecycle Cost", f"{cost_per_kwh_20yr:.3f} €/kWh")
+        total_units = needed_12_round + needed_24_round
+        st.metric("Total Units", f"{total_units}")
     
     # ========================================
     # DETAILED RESULTS IN TABS
@@ -390,7 +326,6 @@ if uploaded is not None:
             - Mirror area: {mirror_area:.2f} m²
             - 12 m² units: {needed_12_round} units
             - 24 m² units: {needed_24_round} units
-            - 36 m² units: {needed_36_round} units
             - Peak thermal power @ 1000 W/m²: {design_peak_kw:.1f} kW
             """)
         
@@ -431,39 +366,20 @@ if uploaded is not None:
             """)
         
         with col2:
-            # Calculate 20-year totals
-            total_20yr_production = annual_system_kwh * 20
-            total_20yr_value = annual_value * 20
-            
             st.markdown(f"""
             **Revenue:**
             - Energy price: {price_per_kwh:.2f} €/kWh
             - Annual production: {annual_system_kwh:,.0f} kWh
             - **Annual value: {annual_value:,.0f} €**
-            - 20-year production: {total_20yr_production:,.0f} kWh
-            - **20-year value: {total_20yr_value:,.0f} €**
             """)
         
         with col3:
-            # Calculate lifecycle cost per kWh
-            total_20yr_production = annual_system_kwh * 20
-            cost_per_kwh_20yr = system_cost / total_20yr_production if total_20yr_production > 0 else 0
-            
             st.markdown(f"""
             **Return on Investment:**
             - Payback period: **{payback_years:.1f} years**
             - Annual ROI: **{(annual_value/system_cost*100):.1f}%**
-            - **Lifecycle cost: {cost_per_kwh_20yr:.3f} €/kWh** (20 years)
-            - Net profit (20 yr): **{(total_20yr_value - system_cost):,.0f} €**
+            - 20-year value: **{(annual_value*20):,.0f} €**
             """)
-        
-        # Add comparison box
-        st.markdown("---")
-        st.info(f"""
-        💡 **Economic Summary:** Over 20 years, this system produces thermal energy at **{cost_per_kwh_20yr:.3f} €/kWh** 
-        (system cost divided by total production). Compared to purchasing energy at **{price_per_kwh:.2f} €/kWh**, 
-        you save **{(price_per_kwh - cost_per_kwh_20yr):.3f} €/kWh** or **{((price_per_kwh - cost_per_kwh_20yr)/price_per_kwh*100):.1f}%** per kWh produced.
-        """)
     
     # ========================================
     # TAB 2: HOURLY PROFILES
@@ -595,7 +511,6 @@ SYSTEM CONFIGURATION
 Mirror area: {mirror_area:.2f} m²
 12 m² units: {needed_12_round}
 24 m² units: {needed_24_round}
-36 m² units: {needed_36_round}
 Optical efficiency: {eta_opt_pct}%
 Thermal losses: {thermal_loss_pct}%
 
