@@ -328,25 +328,27 @@ if uploaded is not None:
     st.markdown("---")
     st.subheader("📊 Summary Results")
     
-    # Format energy smartly (MWh for large values)
-    if annual_system_kwh >= 10000:
-        energy_str = f"{annual_system_kwh/1000:,.1f} MWh"
-    else:
-        energy_str = f"{annual_system_kwh:,.0f} kWh"
+    annual_value = annual_system_kwh * price_per_kwh
+    payback_years = system_cost / annual_value if annual_value > 0 else float("inf")
 
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Annual Energy", energy_str)
+        if annual_system_kwh >= 10000:
+            st.metric("Annual Energy [MWh/yr]", f"{annual_system_kwh/1000:,.1f}")
+        else:
+            st.metric("Annual Energy [kWh/yr]", f"{annual_system_kwh:,.0f}")
     with col2:
-        annual_value = annual_system_kwh * price_per_kwh
-        st.metric("Annual Value", f"{annual_value:,.0f} €")
+        st.metric("Annual Value [€/yr]", f"{annual_value:,.0f}")
     with col3:
-        payback_years = system_cost / annual_value if annual_value > 0 else float("inf")
-        st.metric("Payback", f"{payback_years:.1f} yr")
+        st.metric("Payback [yr]", f"{payback_years:.1f}")
+
+    col4, col5, col6 = st.columns(3)
     with col4:
-        st.metric("LCOE", f"{lcoe:.3f} €/kWh")
+        st.metric("LCOE [€/kWh]", f"{lcoe:.4f}")
     with col5:
-        st.metric("Units", f"{total_units}")
+        st.metric("System Cost [€]", f"{system_cost:,.0f}")
+    with col6:
+        st.metric("Total Units", f"{total_units}")
     
     # ========================================
     # DETAILED RESULTS IN TABS
