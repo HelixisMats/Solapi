@@ -250,7 +250,7 @@ if uploaded is not None:
 
         st.subheader("Calculated values")
         st.metric("Mirror area [m²]", f"{mirror_area:,.2f}")
-        st.metric("Peak average thermal power [kW]", f"{target_peak_kw:,.2f}")
+        st.metric("Peak thermal power (from DNI) [kW]", f"{target_peak_kw:,.2f}")
         st.metric("Peak thermal power @ 1000 W/m² [kW]", f"{design_peak_kw:,.2f}")
 
         st.header("💰 Economic Parameters")
@@ -328,19 +328,25 @@ if uploaded is not None:
     st.markdown("---")
     st.subheader("📊 Summary Results")
     
+    # Format energy smartly (MWh for large values)
+    if annual_system_kwh >= 10000:
+        energy_str = f"{annual_system_kwh/1000:,.1f} MWh"
+    else:
+        energy_str = f"{annual_system_kwh:,.0f} kWh"
+
     col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
-        st.metric("Annual Energy", f"{annual_system_kwh:,.0f} kWh")
+        st.metric("Annual Energy", energy_str)
     with col2:
         annual_value = annual_system_kwh * price_per_kwh
         st.metric("Annual Value", f"{annual_value:,.0f} €")
     with col3:
         payback_years = system_cost / annual_value if annual_value > 0 else float("inf")
-        st.metric("Payback Period", f"{payback_years:.1f} years")
+        st.metric("Payback", f"{payback_years:.1f} yr")
     with col4:
-        st.metric("LCOE", f"{lcoe:.4f} €/kWh")
+        st.metric("LCOE", f"{lcoe:.3f} €/kWh")
     with col5:
-        st.metric("Total Units", f"{total_units}")
+        st.metric("Units", f"{total_units}")
     
     # ========================================
     # DETAILED RESULTS IN TABS
@@ -386,7 +392,7 @@ if uploaded is not None:
             - Optical efficiency: {eta_opt_pct}%
             - Thermal losses: {thermal_loss_pct}%
             - Peak DNI: {hour_matrix_wh.max().max():.0f} W/m²
-            - Average thermal power: {target_peak_kw:.1f} kW
+            - Peak thermal power (from DNI): {target_peak_kw:.1f} kW
             """)
         
         # Energy Production
