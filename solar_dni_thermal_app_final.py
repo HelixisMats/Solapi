@@ -252,7 +252,17 @@ if uploaded is not None:
         item_cost_per_unit = st.number_input("Product cost [€ / unit]", min_value=0.0, value=15000.0)
         installation_cost = st.number_input("Estimated installation cost [€]", min_value=0.0, value=20000.0)
 
-        total_units = needed_12_round + needed_24_round
+        # Calculate actual number of units based on sizing mode
+        if base_mode == "Number of 12 m² units":
+            total_units = n12
+        elif base_mode == "Number of 24 m² units":
+            total_units = n24
+        elif base_mode == "Mix of 12 m² + 24 m² units":
+            total_units = n12 + n24
+        else:
+            # Peak power or Mirror surface → default to 24 m² units
+            total_units = needed_24_round
+
         total_product_cost = total_units * item_cost_per_unit
         system_cost = total_product_cost + installation_cost
 
@@ -294,7 +304,6 @@ if uploaded is not None:
         payback_years = system_cost / annual_value if annual_value > 0 else float("inf")
         st.metric("Payback Period", f"{payback_years:.1f} years")
     with col4:
-        total_units = needed_12_round + needed_24_round
         st.metric("Total Units", f"{total_units}")
     
     # ========================================
