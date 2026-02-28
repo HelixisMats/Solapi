@@ -262,6 +262,7 @@ def generate_report(
     mirror_area: float,
     n12: int,
     n24: int,
+    n36: int,
     eta_opt_pct: float,
     thermal_loss_pct: float,
     design_peak_kw: float,
@@ -285,6 +286,8 @@ def generate_report(
     installation_cost: float,
     annual_value: float,
     payback_years: float,
+    lcoe: float = 0.0,
+    system_lifetime_years: int = 25,
     # Optional metadata
     project_name: str = "",
     location: str = "",
@@ -335,20 +338,31 @@ def generate_report(
                              spaceAfter=4 * mm))
 
     roi_pct = (annual_value / system_cost * 100) if system_cost > 0 else 0
-    twenty_yr_value = annual_value * 20
+    twenty_yr_value = annual_value * system_lifetime_years
 
     story.append(_kpi_row([
         ("Annual System Energy", f"{annual_system_kwh:,.0f} kWh"),
         ("Annual Value",         f"{annual_value:,.0f} \u20ac"),
         ("Payback Period",       f"{payback_years:.1f} yr"),
-        ("20-Year Value",        f"{twenty_yr_value:,.0f} \u20ac"),
+        ("LCOE ({0} yr)".format(system_lifetime_years), f"{lcoe:.4f} \u20ac/kWh"),
+        ("{0}-Year Value".format(system_lifetime_years), f"{twenty_yr_value:,.0f} \u20ac"),
     ], styles))
     story.append(Spacer(1, 6 * mm))
+
+    # Build unit description string (only non-zero)
+    unit_parts = []
+    if n12 > 0:
+        unit_parts.append(f"{n12} x 12 m<super>2</super>")
+    if n24 > 0:
+        unit_parts.append(f"{n24} x 24 m<super>2</super>")
+    if n36 > 0:
+        unit_parts.append(f"{n36} x 36 m<super>2</super>")
+    unit_desc = " + ".join(unit_parts) + " units" if unit_parts else "custom area"
 
     summary_text = (
         f"The proposed Helixis solar concentrator system comprises "
         f"<b>{mirror_area:,.1f} m<super>2</super></b> of mirror aperture area "
-        f"({n12} x 12 m<super>2</super> + {n24} x 24 m<super>2</super> units) "
+        f"({unit_desc}) "
         f"with an optical efficiency of <b>{eta_opt_pct:.0f}%</b> and "
         f"thermal loop losses of <b>{thermal_loss_pct:.0f}%</b>. "
         f"At design-point DNI (1 000 W/m<super>2</super>) the system delivers "
@@ -356,7 +370,9 @@ def generate_report(
         f"Based on site-specific hourly DNI profiles the estimated annual "
         f"useful thermal energy is <b>{annual_system_kwh:,.0f} kWh</b>, "
         f"resulting in an annual economic value of <b>{annual_value:,.0f} \u20ac</b> "
-        f"and a simple payback period of <b>{payback_years:.1f} years</b>."
+        f"and a simple payback period of <b>{payback_years:.1f} years</b>. "
+        f"The levelized cost of energy (LCOE) over {system_lifetime_years} years is "
+        f"<b>{lcoe:.4f} \u20ac/kWh</b>."
     )
     story.append(Paragraph(summary_text, styles["BodyText2"]))
     story.append(Spacer(1, 4 * mm))
@@ -375,8 +391,14 @@ def generate_report(
     config_headers = ["Parameter", "Value"]
     config_rows = [
         ["Total mirror aperture area",    f"{mirror_area:,.2f} m\u00b2"],
-        ["12 m\u00b2 units",              str(n12)],
-        ["24 m\u00b2 units",              str(n24)],
+    ]
+    if n12 > 0:
+        config_rows.append(["12 m\u00b2 units", f"{n12} pcs"])
+    if n24 > 0:
+        config_rows.append(["24 m\u00b2 units", f"{n24} pcs"])
+    if n36 > 0:
+        config_rows.append(["36 m\u00b2 units", f"{n36} pcs"])
+    config_rows += [
         ["Optical efficiency",            f"{eta_opt_pct:.0f} %"],
         ["Thermal loop losses",           f"{thermal_loss_pct:.0f} %"],
         ["Peak thermal power (design)",   f"{design_peak_kw:,.1f} kW"],
@@ -439,6 +461,7 @@ def generate_report(
         ("System Cost",    f"{system_cost:,.0f} \u20ac"),
         ("Annual Revenue", f"{annual_value:,.0f} \u20ac"),
         ("Payback",        f"{payback_years:.1f} yr"),
+        ("LCOE ({0} yr)".format(system_lifetime_years), f"{lcoe:.4f} \u20ac/kWh"),
         ("Annual ROI",     f"{roi_pct:.1f} %"),
     ], styles))
     story.append(Spacer(1, 6 * mm))
@@ -452,6 +475,7 @@ def generate_report(
         ["Annual system production",  f"{annual_system_kwh:,.0f} kWh"],
         ["Annual economic value",     f"{annual_value:,.0f} \u20ac"],
         ["Simple payback period",     f"{payback_years:.1f} years"],
+        ["LCOE ({0} yr lifetime)".format(system_lifetime_years), f"{lcoe:.4f} \u20ac/kWh"],
         ["Annual ROI",                f"{roi_pct:.1f} %"],
         ["20-year cumulative value",  f"{twenty_yr_value:,.0f} \u20ac"],
     ]
@@ -462,7 +486,8 @@ def generate_report(
     story.append(Paragraph("Cumulative Cash Flow", styles["SubSection"]))
     cf_headers = ["Year", "Cumulative [\u20ac]", "Net [\u20ac]"]
     cf_rows = []
-    for yr in [1, 2, 3, 5, 10, 15, 20]:
+    cf_years = sorted(set([1, 2, 3, 5, 10, 15, 20, system_lifetime_years]))
+    for yr in cf_years:
         cum_rev = annual_value * yr
         net = cum_rev - system_cost
         cf_rows.append([str(yr), f"{cum_rev:,.0f}", f"{net:,.0f}"])

@@ -88,6 +88,7 @@ MONTHS = list(DAYS_IN_MONTH.keys())
 
 APERTURE_12 = 12.35
 APERTURE_24 = 24.7
+APERTURE_36 = 37.15
 DESIGN_DNI_W_M2 = 1000.0
 
 # -------------------------------------------------
@@ -186,7 +187,8 @@ with st.sidebar:
             "Mirror surface (m²)",
             "Number of 12 m² units",
             "Number of 24 m² units",
-            "Mix of 12 m² + 24 m² units",
+            "Number of 36 m² units",
+            "Mix of units",
         ]
     )
 
@@ -208,6 +210,7 @@ if uploaded is not None:
 
         n12 = 0
         n24 = 0
+        n36 = 0
 
         if base_mode == "Peak thermal power (kW)":
             target_peak_kw = st.number_input("Target peak power [kW]", min_value=0.1, value=100.0)
@@ -227,16 +230,21 @@ if uploaded is not None:
             mirror_area = n24 * APERTURE_24
             target_peak_kw = mirror_area * peak_kw_per_m2
 
-        elif base_mode == "Mix of 12 m² + 24 m² units":
-            n12 = st.number_input("Number of 12 m² units", min_value=0, value=1)
-            n24 = st.number_input("Number of 24 m² units", min_value=0, value=1)
-            mirror_area = n12 * APERTURE_12 + n24 * APERTURE_24
+        elif base_mode == "Number of 36 m² units":
+            n36 = st.number_input("Number of 36 m² units", min_value=0, value=1)
+            mirror_area = n36 * APERTURE_36
             target_peak_kw = mirror_area * peak_kw_per_m2
 
-        needed_12_exact = mirror_area / APERTURE_12
-        needed_24_exact = mirror_area / APERTURE_24
-        needed_12_round = math.ceil(needed_12_exact)
-        needed_24_round = math.ceil(needed_24_exact)
+        elif base_mode == "Mix of units":
+            n12 = st.number_input("Number of 12 m² units", min_value=0, value=0)
+            n24 = st.number_input("Number of 24 m² units", min_value=0, value=0)
+            n36 = st.number_input("Number of 36 m² units", min_value=0, value=1)
+            mirror_area = n12 * APERTURE_12 + n24 * APERTURE_24 + n36 * APERTURE_36
+            target_peak_kw = mirror_area * peak_kw_per_m2
+
+        needed_12_round = math.ceil(mirror_area / APERTURE_12)
+        needed_24_round = math.ceil(mirror_area / APERTURE_24)
+        needed_36_round = math.ceil(mirror_area / APERTURE_36)
 
         design_peak_kw = mirror_area * (DESIGN_DNI_W_M2 / 1000.0) * eta_opt
 
@@ -254,17 +262,37 @@ if uploaded is not None:
 
         # Calculate actual number of units based on sizing mode
         if base_mode == "Number of 12 m² units":
+            actual_n12 = n12
+            actual_n24 = 0
+            actual_n36 = 0
             total_units = n12
         elif base_mode == "Number of 24 m² units":
+            actual_n12 = 0
+            actual_n24 = n24
+            actual_n36 = 0
             total_units = n24
-        elif base_mode == "Mix of 12 m² + 24 m² units":
-            total_units = n12 + n24
+        elif base_mode == "Number of 36 m² units":
+            actual_n12 = 0
+            actual_n24 = 0
+            actual_n36 = n36
+            total_units = n36
+        elif base_mode == "Mix of units":
+            actual_n12 = n12
+            actual_n24 = n24
+            actual_n36 = n36
+            total_units = n12 + n24 + n36
         else:
-            # Peak power or Mirror surface → default to 24 m² units
-            total_units = needed_24_round
+            # Peak power or Mirror surface → default to 36 m² units
+            actual_n12 = 0
+            actual_n24 = 0
+            actual_n36 = needed_36_round
+            total_units = needed_36_round
 
         total_product_cost = total_units * item_cost_per_unit
         system_cost = total_product_cost + installation_cost
+
+        # LCOE lifetime input (calculation done after energy computation)
+        system_lifetime_years = st.number_input("System lifetime [years]", min_value=1, value=25)
 
         st.metric("Total product cost [€]", f"{total_product_cost:,.0f}")
         st.metric("Total system cost [€]", f"{system_cost:,.0f}")
@@ -288,13 +316,19 @@ if uploaded is not None:
     )
 
     # ========================================
+    # LCOE CALCULATION
+    # ========================================
+    lifetime_energy = annual_system_kwh * system_lifetime_years if annual_system_kwh > 0 else 1
+    lcoe = system_cost / lifetime_energy if lifetime_energy > 0 else float("inf")
+
+    # ========================================
     # SUMMARY SECTION (Always visible at top)
     # ========================================
     
     st.markdown("---")
     st.subheader("📊 Summary Results")
     
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         st.metric("Annual Energy", f"{annual_system_kwh:,.0f} kWh")
     with col2:
@@ -304,6 +338,8 @@ if uploaded is not None:
         payback_years = system_cost / annual_value if annual_value > 0 else float("inf")
         st.metric("Payback Period", f"{payback_years:.1f} years")
     with col4:
+        st.metric("LCOE", f"{lcoe:.4f} €/kWh")
+    with col5:
         st.metric("Total Units", f"{total_units}")
     
     # ========================================
@@ -331,12 +367,17 @@ if uploaded is not None:
         col1, col2 = st.columns(2)
         
         with col1:
+            unit_lines = f"            - Mirror area: {mirror_area:.2f} m²\n"
+            if actual_n12 > 0:
+                unit_lines += f"            - 12 m² units: {actual_n12} pcs\n"
+            if actual_n24 > 0:
+                unit_lines += f"            - 24 m² units: {actual_n24} pcs\n"
+            if actual_n36 > 0:
+                unit_lines += f"            - 36 m² units: {actual_n36} pcs\n"
+            unit_lines += f"            - Peak thermal power @ 1000 W/m²: {design_peak_kw:.1f} kW"
             st.markdown(f"""
             **Mirror Configuration:**
-            - Mirror area: {mirror_area:.2f} m²
-            - 12 m² units: {needed_12_round} units
-            - 24 m² units: {needed_24_round} units
-            - Peak thermal power @ 1000 W/m²: {design_peak_kw:.1f} kW
+{unit_lines}
             """)
         
         with col2:
@@ -387,8 +428,9 @@ if uploaded is not None:
             st.markdown(f"""
             **Return on Investment:**
             - Payback period: **{payback_years:.1f} years**
+            - LCOE ({system_lifetime_years} yr): **{lcoe:.4f} €/kWh**
             - Annual ROI: **{(annual_value/system_cost*100):.1f}%**
-            - 20-year value: **{(annual_value*20):,.0f} €**
+            - {system_lifetime_years}-year value: **{(annual_value*system_lifetime_years):,.0f} €**
             """)
     
     # ========================================
@@ -501,8 +543,9 @@ if uploaded is not None:
         
         pdf_bytes = generate_report(
             mirror_area=mirror_area,
-            n12=needed_12_round,
-            n24=needed_24_round,
+            n12=actual_n12,
+            n24=actual_n24,
+            n36=actual_n36,
             eta_opt_pct=eta_opt_pct,
             thermal_loss_pct=thermal_loss_pct,
             design_peak_kw=design_peak_kw,
@@ -524,6 +567,8 @@ if uploaded is not None:
             installation_cost=installation_cost,
             annual_value=annual_value,
             payback_years=payback_years,
+            lcoe=lcoe,
+            system_lifetime_years=system_lifetime_years,
             project_name=project_name,
             location=location_text,
             notes=notes_text,
@@ -563,6 +608,13 @@ if uploaded is not None:
         
         with col2:
             st.markdown("#### 📝 Text Summary")
+            unit_text = ""
+            if actual_n12 > 0:
+                unit_text += f"12 m² units: {actual_n12}\n"
+            if actual_n24 > 0:
+                unit_text += f"24 m² units: {actual_n24}\n"
+            if actual_n36 > 0:
+                unit_text += f"36 m² units: {actual_n36}\n"
             summary_text = f"""
 HELIXIS SOLAR CONCENTRATOR - PRODUCTION ESTIMATE
 ================================================
@@ -570,9 +622,7 @@ HELIXIS SOLAR CONCENTRATOR - PRODUCTION ESTIMATE
 SYSTEM CONFIGURATION
 --------------------
 Mirror area: {mirror_area:.2f} m²
-12 m² units: {needed_12_round}
-24 m² units: {needed_24_round}
-Optical efficiency: {eta_opt_pct}%
+{unit_text}Optical efficiency: {eta_opt_pct}%
 Thermal losses: {thermal_loss_pct}%
 
 ENERGY PRODUCTION
@@ -586,6 +636,7 @@ System cost: {system_cost:,.0f} €
 Energy price: {price_per_kwh:.2f} €/kWh
 Annual value: {annual_value:,.0f} €
 Payback period: {payback_years:.1f} years
+LCOE ({system_lifetime_years} yr): {lcoe:.4f} €/kWh
 
 MONTHLY PRODUCTION (kWh)
 ------------------------
