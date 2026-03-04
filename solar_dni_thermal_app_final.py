@@ -454,7 +454,9 @@ if uploaded is not None:
             hourly_direct_kw.style
             .format("{:.1f}")
             .set_properties(**{"line-height": "0.5rem", "padding": "2px", "font-size": "11px"})
-            .background_gradient(cmap="YlOrRd", axis=0)
+            .background_gradient(cmap="YlOrRd", axis=0),
+            use_container_width=True,
+            height=(len(hourly_direct_kw) + 1) * 35 + 3
         )
         
         # System Power Profile (if losses exist)
@@ -464,7 +466,9 @@ if uploaded is not None:
                 hourly_system_kw.style
                 .format("{:.1f}")
                 .set_properties(**{"line-height": "0.5rem", "padding": "2px", "font-size": "11px"})
-                .background_gradient(cmap="YlOrRd", axis=0)
+                .background_gradient(cmap="YlOrRd", axis=0),
+                use_container_width=True,
+                height=(len(hourly_system_kw) + 1) * 35 + 3
             )
         
         # Daily Summary
@@ -515,7 +519,9 @@ if uploaded is not None:
             hour_matrix_wh.style
             .format("{:.0f}")
             .set_properties(**{"line-height": "0.5rem", "padding": "2px", "font-size": "11px"})
-            .background_gradient(cmap="YlOrBr", axis=0)
+            .background_gradient(cmap="YlOrBr", axis=0),
+            use_container_width=True,
+            height=(len(hour_matrix_wh) + 1) * 35 + 3
         )
         
         # DNI statistics
