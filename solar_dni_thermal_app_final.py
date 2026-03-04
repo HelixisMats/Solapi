@@ -450,7 +450,7 @@ if uploaded is not None:
         
         # Direct Power Profile
         st.markdown("#### Direct Power into Media [kW_th]")
-        st.table(
+        st.dataframe(
             hourly_direct_kw.style
             .format("{:.1f}")
             .set_properties(**{"line-height": "0.5rem", "padding": "2px", "font-size": "11px"})
@@ -460,7 +460,7 @@ if uploaded is not None:
         # System Power Profile (if losses exist)
         if thermal_loss_frac > 0:
             st.markdown("#### System Power after Loop [kW_th]")
-            st.table(
+            st.dataframe(
                 hourly_system_kw.style
                 .format("{:.1f}")
                 .set_properties(**{"line-height": "0.5rem", "padding": "2px", "font-size": "11px"})
@@ -511,7 +511,7 @@ if uploaded is not None:
         st.markdown("### ☀️ Input DNI Hourly Profile [W/m²]")
         st.markdown("*Source data from Global Solar Atlas*")
         
-        st.table(
+        st.dataframe(
             hour_matrix_wh.style
             .format("{:.0f}")
             .set_properties(**{"line-height": "0.5rem", "padding": "2px", "font-size": "11px"})
