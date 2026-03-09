@@ -12,6 +12,10 @@ import math
 
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -20,7 +24,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    PageBreak, HRFlowable, KeepTogether,
+    PageBreak, HRFlowable, KeepTogether, Image,
 )
 from reportlab.graphics.shapes import Drawing, Rect, String, Line
 from reportlab.graphics.charts.barcharts import VerticalBarChart
@@ -39,6 +43,7 @@ BLACK        = colors.black
 
 PAGE_W, PAGE_H = A4
 MARGIN = 20 * mm
+CONTENT_W = PAGE_W - 2 * MARGIN
 
 
 # ─── Custom styles ──────────────────────────────────────────────────
@@ -90,32 +95,29 @@ def _build_styles():
 
 # ─── Helper: KPI card row ──────────────────────────────────────────
 def _kpi_row(items, styles):
-    """Return a Table acting as a KPI card row.
-    items: list of (label, value_str) tuples.
-    """
     header_cells = [Paragraph(lbl, styles["KPILabel"]) for lbl, _ in items]
     value_cells  = [Paragraph(val, styles["KPIValue"]) for _, val in items]
 
     n = len(items)
-    col_w = (PAGE_W - 2 * MARGIN) / n
+    col_w = CONTENT_W / n
 
     t = Table([value_cells, header_cells], colWidths=[col_w] * n)
     t.setStyle(TableStyle([
         ("ALIGN",      (0, 0), (-1, -1), "CENTER"),
         ("VALIGN",     (0, 0), (-1, -1), "MIDDLE"),
         ("BACKGROUND", (0, 0), (-1, -1), BRAND_LIGHT),
-        ("ROUNDEDCORNERS", [4, 4, 4, 4]),
         ("TOPPADDING",    (0, 0), (-1, -1), 8),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
         ("LEFTPADDING",   (0, 0), (-1, -1), 4),
         ("RIGHTPADDING",  (0, 0), (-1, -1), 4),
+        ("BOX",        (0, 0), (-1, -1), 0.5, colors.HexColor("#DEE2E6")),
+        ("INNERGRID",  (0, 0), (-1, -1), 0.5, colors.HexColor("#DEE2E6")),
     ]))
     return t
 
 
 # ─── Helper: styled data table ─────────────────────────────────────
 def _data_table(headers, rows, col_widths=None):
-    """Return a nicely formatted Table."""
     hdr = [Paragraph(f"<b>{h}</b>", ParagraphStyle(
         "TH", fontSize=8, leading=10, textColor=WHITE, alignment=TA_CENTER,
         fontName="Helvetica-Bold",
@@ -130,7 +132,7 @@ def _data_table(headers, rows, col_widths=None):
     data = [hdr] + body
     n = len(headers)
     if col_widths is None:
-        col_widths = [(PAGE_W - 2 * MARGIN) / n] * n
+        col_widths = [CONTENT_W / n] * n
 
     t = Table(data, colWidths=col_widths, repeatRows=1)
     style_cmds = [
@@ -148,9 +150,76 @@ def _data_table(headers, rows, col_widths=None):
     return t
 
 
+# ─── Helper: matplotlib heatmap → ReportLab Image ──────────────────
+def _heatmap_image(df, title, unit_label, cmap="YlOrRd",
+                   fig_width_mm=170, fig_height_mm=90):
+    """
+    Render a pandas DataFrame as a colour heatmap using matplotlib
+    and return a ReportLab Image flowable.
+    Rows = hours, Columns = months.
+    """
+    data = df.values.astype(float)
+    row_labels = [str(r) for r in df.index]
+    col_labels = [str(c) for c in df.columns]
+
+    # Drop all-zero rows (night hours)
+    nonzero_mask = data.max(axis=1) > 0
+    data = data[nonzero_mask]
+    row_labels = [l for l, m in zip(row_labels, nonzero_mask) if m]
+
+    nrows, ncols = data.shape
+
+    fig_w_in = fig_width_mm / 25.4
+    fig_h_in = max(fig_height_mm / 25.4, nrows * 0.22 + 0.8)
+
+    fig, ax = plt.subplots(figsize=(fig_w_in, fig_h_in))
+
+    im = ax.imshow(data, aspect="auto", cmap=cmap,
+                   interpolation="nearest",
+                   vmin=0, vmax=data.max() if data.max() > 0 else 1)
+
+    # Axes labels
+    ax.set_xticks(range(ncols))
+    ax.set_xticklabels(col_labels, fontsize=7)
+    ax.set_yticks(range(nrows))
+    ax.set_yticklabels(row_labels, fontsize=6.5)
+    ax.xaxis.tick_top()
+    ax.xaxis.set_label_position("top")
+
+    # Value annotations (only if cells are big enough)
+    if nrows <= 18 and ncols <= 12:
+        thresh = data.max() * 0.55
+        for r in range(nrows):
+            for c in range(ncols):
+                v = data[r, c]
+                txt_color = "white" if v > thresh else "#333333"
+                ax.text(c, r, f"{v:.0f}", ha="center", va="center",
+                        fontsize=5.5, color=txt_color)
+
+    # Colorbar
+    cbar = fig.colorbar(im, ax=ax, pad=0.02, fraction=0.03)
+    cbar.ax.tick_params(labelsize=6)
+    cbar.set_label(unit_label, fontsize=7)
+
+    ax.set_title(title, fontsize=9, fontweight="bold",
+                 color="#1B2A4A", pad=8)
+
+    fig.tight_layout(pad=0.5)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+
+    img_w = fig_width_mm * mm
+    # Maintain aspect ratio
+    img_h = fig_h_in / fig_w_in * img_w
+
+    return Image(buf, width=img_w, height=img_h)
+
+
 # ─── Helper: bar chart ─────────────────────────────────────────────
 def _monthly_bar_chart(months, direct_vals, system_vals, title_text=""):
-    """Return a Drawing with a grouped bar chart."""
     dw, dh = 480, 220
     d = Drawing(dw, dh)
 
@@ -162,7 +231,6 @@ def _monthly_bar_chart(months, direct_vals, system_vals, title_text=""):
     chart.data = [list(direct_vals), list(system_vals)]
     chart.categoryAxis.categoryNames = list(months)
     chart.categoryAxis.labels.fontSize = 7
-    chart.categoryAxis.labels.angle = 0
     chart.valueAxis.labels.fontSize = 7
     chart.valueAxis.valueMin = 0
     chart.valueAxis.labelTextFormat = "%0.0f"
@@ -192,35 +260,89 @@ def _monthly_bar_chart(months, direct_vals, system_vals, title_text=""):
     return d
 
 
-# ─── Helper: hourly heat-map-style table ───────────────────────────
-def _hourly_profile_table(hour_matrix, label="kW"):
-    """Compact hourly × monthly table."""
-    months = list(hour_matrix.columns)
-    hours  = list(hour_matrix.index)
+# ─── Helper: monthly value bar chart ──────────────────────────────
+def _monthly_value_chart(months, values, title_text=""):
+    """Single-series bar chart for monthly economic value."""
+    dw, dh = 480, 200
+    d = Drawing(dw, dh)
 
-    headers = ["Hour"] + months
-    rows = []
-    for h in hours:
-        row_vals = hour_matrix.loc[h]
-        if row_vals.max() == 0 and row_vals.min() == 0:
-            continue  # skip pure-zero rows
-        rows.append([str(h)] + [f"{v:.0f}" for v in row_vals])
+    chart = VerticalBarChart()
+    chart.x = 50
+    chart.y = 35
+    chart.width = dw - 80
+    chart.height = dh - 60
+    chart.data = [list(values)]
+    chart.categoryAxis.categoryNames = list(months)
+    chart.categoryAxis.labels.fontSize = 7
+    chart.valueAxis.labels.fontSize = 7
+    chart.valueAxis.valueMin = 0
+    chart.valueAxis.labelTextFormat = "%0.0f"
+    chart.bars[0].fillColor = BRAND_GREEN
+    chart.bars.strokeWidth = 0
+    chart.barSpacing = 2
+    chart.groupSpacing = 8
 
-    if not rows:
-        rows = [["—"] * len(headers)]
+    d.add(chart)
+    if title_text:
+        d.add(String(dw / 2, dh - 2, title_text,
+                      fontSize=10, fillColor=BRAND_DARK,
+                      textAnchor="middle", fontName="Helvetica-Bold"))
+    return d
 
-    n = len(headers)
-    first_w = 30 * mm
-    rest_w  = (PAGE_W - 2 * MARGIN - first_w) / (n - 1)
-    col_ws  = [first_w] + [rest_w] * (n - 1)
 
-    return _data_table(headers, rows, col_widths=col_ws)
+# ─── Helper: cumulative cash-flow line chart ───────────────────────
+def _cashflow_chart(annual_value, system_cost, lifetime_years):
+    """Line chart showing cumulative revenue vs system cost break-even."""
+    years = list(range(0, lifetime_years + 1))
+    cum_revenue = [annual_value * y for y in years]
+    cost_line   = [system_cost] * len(years)
+
+    dw, dh = 480, 200
+    d = Drawing(dw, dh)
+
+    chart = LinePlot()
+    chart.x = 50
+    chart.y = 35
+    chart.width = dw - 80
+    chart.height = dh - 60
+    chart.data = [
+        list(zip(years, cum_revenue)),
+        list(zip(years, cost_line)),
+    ]
+    chart.lines[0].strokeColor = BRAND_GREEN
+    chart.lines[0].strokeWidth = 2
+    chart.lines[1].strokeColor = BRAND_ACCENT
+    chart.lines[1].strokeWidth = 1.5
+    chart.lines[1].strokeDashArray = [4, 3]
+
+    chart.xValueAxis.valueMin = 0
+    chart.xValueAxis.valueMax = lifetime_years
+    chart.xValueAxis.labels.fontSize = 7
+    chart.yValueAxis.valueMin = 0
+    chart.yValueAxis.labels.fontSize = 7
+    chart.yValueAxis.labelTextFormat = "%0.0f"
+
+    legend = Legend()
+    legend.x = dw / 2 - 90
+    legend.y = dh - 12
+    legend.fontSize = 8
+    legend.alignment = "right"
+    legend.colorNamePairs = [
+        (BRAND_GREEN,  "Cumulative Revenue"),
+        (BRAND_ACCENT, "System Cost"),
+    ]
+    d.add(chart)
+    d.add(legend)
+    d.add(String(dw / 2, dh - 2,
+                  "Cumulative Cash Flow [EUR]",
+                  fontSize=10, fillColor=BRAND_DARK,
+                  textAnchor="middle", fontName="Helvetica-Bold"))
+    return d
 
 
 # ─── Page templates (header / footer) ──────────────────────────────
 def _header_footer(canvas, doc):
     canvas.saveState()
-    # Header line
     canvas.setStrokeColor(BRAND_ACCENT)
     canvas.setLineWidth(1.5)
     canvas.line(MARGIN, PAGE_H - 14 * mm, PAGE_W - MARGIN, PAGE_H - 14 * mm)
@@ -232,7 +354,6 @@ def _header_footer(canvas, doc):
     canvas.drawRightString(PAGE_W - MARGIN, PAGE_H - 12 * mm,
                            "Thermal Production Estimate")
 
-    # Footer
     canvas.setStrokeColor(colors.HexColor("#DEE2E6"))
     canvas.setLineWidth(0.5)
     canvas.line(MARGIN, 12 * mm, PAGE_W - MARGIN, 12 * mm)
@@ -246,11 +367,9 @@ def _header_footer(canvas, doc):
 
 
 def _cover_background(canvas, doc):
-    """Dark cover page – no header/footer."""
     canvas.saveState()
     canvas.setFillColor(BRAND_DARK)
     canvas.rect(0, 0, PAGE_W, PAGE_H, fill=1, stroke=0)
-    # Accent bar
     canvas.setFillColor(BRAND_ACCENT)
     canvas.rect(0, PAGE_H * 0.42, PAGE_W, 4 * mm, fill=1, stroke=0)
     canvas.restoreState()
@@ -338,18 +457,17 @@ def generate_report(
                              spaceAfter=4 * mm))
 
     roi_pct = (annual_value / system_cost * 100) if system_cost > 0 else 0
-    twenty_yr_value = annual_value * system_lifetime_years
+    lifetime_value = annual_value * system_lifetime_years
 
     story.append(_kpi_row([
         ("Annual System Energy", f"{annual_system_kwh:,.0f} kWh"),
         ("Annual Value",         f"{annual_value:,.0f} \u20ac"),
         ("Payback Period",       f"{payback_years:.1f} yr"),
         ("LCOE ({0} yr)".format(system_lifetime_years), f"{lcoe:.4f} \u20ac/kWh"),
-        ("{0}-Year Value".format(system_lifetime_years), f"{twenty_yr_value:,.0f} \u20ac"),
+        ("{0}-Year Value".format(system_lifetime_years), f"{lifetime_value:,.0f} \u20ac"),
     ], styles))
     story.append(Spacer(1, 6 * mm))
 
-    # Build unit description string (only non-zero)
     unit_parts = []
     if n12 > 0:
         unit_parts.append(f"{n12} x 12 m<super>2</super>")
@@ -401,10 +519,13 @@ def generate_report(
     config_rows += [
         ["Optical efficiency",            f"{eta_opt_pct:.0f} %"],
         ["Thermal loop losses",           f"{thermal_loss_pct:.0f} %"],
-        ["Peak thermal power (design)",   f"{design_peak_kw:,.1f} kW"],
-        ["Peak thermal power (from DNI)", f"{target_peak_kw:,.1f} kW"],
+        ["Peak thermal power (design @ 1000 W/m\u00b2)", f"{design_peak_kw:,.1f} kW"],
+        ["Peak thermal power (from site DNI)",            f"{target_peak_kw:,.1f} kW"],
+        ["Annual DNI",                    f"{annual_kwh_m2:.0f} kWh/m\u00b2"],
+        ["Peak DNI",                      f"{hour_matrix_wh.max().max():.0f} W/m\u00b2"],
+        ["Best solar month",              str(monthly_kwh_m2.idxmax())],
     ]
-    cw = [(PAGE_W - 2 * MARGIN) * 0.55, (PAGE_W - 2 * MARGIN) * 0.45]
+    cw = [CONTENT_W * 0.60, CONTENT_W * 0.40]
     story.append(_data_table(config_headers, config_rows, col_widths=cw))
     story.append(Spacer(1, 6 * mm))
 
@@ -415,32 +536,34 @@ def generate_report(
     story.append(HRFlowable(width="100%", thickness=1, color=BRAND_ACCENT,
                              spaceAfter=4 * mm))
 
-    # 3a – table
     months = list(monthly_direct_kwh.index)
     econ_monthly = monthly_system_kwh.values * price_per_kwh
+    dni_monthly  = monthly_kwh_m2.values
 
-    energy_headers = ["Month", "Direct [kWh]", "System [kWh]", "Value [\u20ac]"]
+    energy_headers = ["Month", "DNI [kWh/m\u00b2]", "Direct [kWh]",
+                       "System [kWh]", "Value [\u20ac]"]
     energy_rows = []
     for i, m in enumerate(months):
         energy_rows.append([
             m,
+            f"{dni_monthly[i]:,.1f}",
             f"{monthly_direct_kwh.values[i]:,.0f}",
             f"{monthly_system_kwh.values[i]:,.0f}",
             f"{econ_monthly[i]:,.0f}",
         ])
-    # Totals row
     energy_rows.append([
         "TOTAL",
+        f"{annual_kwh_m2:,.1f}",
         f"{annual_direct_kwh:,.0f}",
         f"{annual_system_kwh:,.0f}",
         f"{annual_value:,.0f}",
     ])
 
-    ew = (PAGE_W - 2 * MARGIN) / 4
-    story.append(_data_table(energy_headers, energy_rows, col_widths=[ew] * 4))
+    ew = CONTENT_W / 5
+    story.append(_data_table(energy_headers, energy_rows, col_widths=[ew] * 5))
     story.append(Spacer(1, 6 * mm))
 
-    # 3b – chart
+    # Bar chart – monthly energy
     story.append(_monthly_bar_chart(
         months,
         monthly_direct_kwh.values,
@@ -448,6 +571,13 @@ def generate_report(
         title_text="Monthly Energy Production [kWh]",
     ))
     story.append(Spacer(1, 4 * mm))
+
+    # Bar chart – monthly value
+    story.append(_monthly_value_chart(
+        months,
+        econ_monthly,
+        title_text="Monthly Economic Value [\u20ac]",
+    ))
 
     # ================================================================
     # 4. ECONOMIC ANALYSIS
@@ -477,21 +607,27 @@ def generate_report(
         ["Simple payback period",     f"{payback_years:.1f} years"],
         ["LCOE ({0} yr lifetime)".format(system_lifetime_years), f"{lcoe:.4f} \u20ac/kWh"],
         ["Annual ROI",                f"{roi_pct:.1f} %"],
-        ["20-year cumulative value",  f"{twenty_yr_value:,.0f} \u20ac"],
+        ["{0}-year cumulative value".format(system_lifetime_years),
+         f"{lifetime_value:,.0f} \u20ac"],
     ]
     story.append(_data_table(econ_headers, econ_rows, col_widths=cw))
     story.append(Spacer(1, 6 * mm))
 
-    # Cumulative cash-flow mini table
+    # Cumulative cash-flow chart
+    story.append(_cashflow_chart(annual_value, system_cost, system_lifetime_years))
+    story.append(Spacer(1, 6 * mm))
+
+    # Cumulative cash-flow table
     story.append(Paragraph("Cumulative Cash Flow", styles["SubSection"]))
-    cf_headers = ["Year", "Cumulative [\u20ac]", "Net [\u20ac]"]
+    cf_headers = ["Year", "Cumulative Revenue [\u20ac]", "Net Position [\u20ac]"]
     cf_rows = []
     cf_years = sorted(set([1, 2, 3, 5, 10, 15, 20, system_lifetime_years]))
     for yr in cf_years:
         cum_rev = annual_value * yr
         net = cum_rev - system_cost
-        cf_rows.append([str(yr), f"{cum_rev:,.0f}", f"{net:,.0f}"])
-    cf_w = (PAGE_W - 2 * MARGIN) / 3
+        cf_rows.append([str(yr), f"{cum_rev:,.0f}",
+                         f"{net:+,.0f}"])
+    cf_w = CONTENT_W / 3
     story.append(_data_table(cf_headers, cf_rows, col_widths=[cf_w] * 3))
 
     # ================================================================
@@ -502,55 +638,147 @@ def generate_report(
     story.append(HRFlowable(width="100%", thickness=1, color=BRAND_ACCENT,
                              spaceAfter=4 * mm))
 
-    daily_headers = ["Month", "Direct [kWh/day]", "System [kWh/day]"]
+    daily_headers = ["Month", "Direct [kWh/day]", "System [kWh/day]",
+                      "Value [\u20ac/day]"]
     daily_rows = []
     for i, m in enumerate(months):
+        daily_val = daily_system_kwh.values[i] * price_per_kwh
         daily_rows.append([
             m,
             f"{daily_direct_kwh.values[i]:,.1f}",
             f"{daily_system_kwh.values[i]:,.1f}",
+            f"{daily_val:,.2f}",
         ])
-    dw_col = (PAGE_W - 2 * MARGIN) / 3
-    story.append(_data_table(daily_headers, daily_rows, col_widths=[dw_col] * 3))
+    dw_col = CONTENT_W / 4
+    story.append(_data_table(daily_headers, daily_rows, col_widths=[dw_col] * 4))
     story.append(Spacer(1, 6 * mm))
 
     # ================================================================
-    # 6. DNI INPUT DATA
+    # 6. DNI INPUT DATA + HEATMAP
     # ================================================================
-    story.append(Paragraph("6 &nbsp; DNI Input Data", styles["SectionTitle"]))
+    story.append(Paragraph("6 &nbsp; Solar DNI Input Data", styles["SectionTitle"]))
     story.append(HRFlowable(width="100%", thickness=1, color=BRAND_ACCENT,
                              spaceAfter=4 * mm))
 
     story.append(Paragraph(
-        f"Peak DNI: <b>{hour_matrix_wh.max().max():.0f} W/m<super>2</super></b> &nbsp;|&nbsp; "
-        f"Annual DNI: <b>{annual_kwh_m2:.0f} kWh/m<super>2</super></b> &nbsp;|&nbsp; "
+        f"Peak DNI: <b>{hour_matrix_wh.max().max():.0f} W/m<super>2</super></b>"
+        f" &nbsp;|&nbsp; "
+        f"Annual DNI: <b>{annual_kwh_m2:.0f} kWh/m<super>2</super></b>"
+        f" &nbsp;|&nbsp; "
         f"Best month: <b>{monthly_kwh_m2.idxmax()}</b>",
         styles["BodyText2"],
     ))
     story.append(Spacer(1, 4 * mm))
 
-    story.append(Paragraph("Hourly DNI Profile [W/m<super>2</super>]", styles["SubSection"]))
-    story.append(_hourly_profile_table(hour_matrix_wh, label="W/m\u00b2"))
+    # DNI heatmap
+    story.append(Paragraph(
+        "Hourly DNI Heatmap [W/m<super>2</super>]  "
+        "<i>(rows = hours, columns = months)</i>",
+        styles["SubSection"],
+    ))
+    story.append(_heatmap_image(
+        hour_matrix_wh,
+        title="DNI – Hourly Profile [W/m²]",
+        unit_label="W/m²",
+        cmap="YlOrBr",
+        fig_width_mm=170,
+        fig_height_mm=110,
+    ))
+    story.append(Spacer(1, 4 * mm))
+    story.append(Paragraph(
+        "The table below lists the raw hourly DNI values [W/m\u00b2].",
+        styles["BodyText2"],
+    ))
+    story.append(Spacer(1, 3 * mm))
+
+    # DNI numeric table
+    dni_month_headers = ["Hour"] + list(hour_matrix_wh.columns)
+    dni_rows = []
+    for h in hour_matrix_wh.index:
+        row_vals = hour_matrix_wh.loc[h]
+        if row_vals.max() == 0:
+            continue
+        dni_rows.append([str(h)] + [f"{v:.0f}" for v in row_vals])
+    n_cols = len(dni_month_headers)
+    first_w = 22 * mm
+    rest_w  = (CONTENT_W - first_w) / (n_cols - 1)
+    story.append(_data_table(
+        dni_month_headers, dni_rows,
+        col_widths=[first_w] + [rest_w] * (n_cols - 1),
+    ))
 
     # ================================================================
-    # 7. HOURLY THERMAL PROFILES
+    # 7. HOURLY THERMAL PROFILES + HEATMAPS
     # ================================================================
     story.append(PageBreak())
-    story.append(Paragraph("7 &nbsp; Hourly Thermal Profiles", styles["SectionTitle"]))
+    story.append(Paragraph("7 &nbsp; Hourly Thermal Power Profiles",
+                             styles["SectionTitle"]))
     story.append(HRFlowable(width="100%", thickness=1, color=BRAND_ACCENT,
                              spaceAfter=4 * mm))
 
-    story.append(Paragraph("Direct Thermal Power [kW]", styles["SubSection"]))
-    story.append(_hourly_profile_table(hourly_direct_kw.round(1), label="kW"))
-    story.append(Spacer(1, 6 * mm))
+    # 7a – Direct power heatmap
+    story.append(Paragraph("Direct Thermal Power Heatmap [kW<sub>th</sub>]",
+                             styles["SubSection"]))
+    story.append(_heatmap_image(
+        hourly_direct_kw.round(1),
+        title="Direct Thermal Power [kW]",
+        unit_label="kW",
+        cmap="YlOrRd",
+        fig_width_mm=170,
+        fig_height_mm=110,
+    ))
+    story.append(Spacer(1, 4 * mm))
 
+    # 7b – Direct power table
+    story.append(Paragraph(
+        "Direct Thermal Power – numeric table [kW]", styles["BodyText2"]
+    ))
+    story.append(Spacer(1, 3 * mm))
+    tbl_headers = ["Hour"] + list(hourly_direct_kw.columns)
+    tbl_rows = []
+    for h in hourly_direct_kw.index:
+        row_vals = hourly_direct_kw.loc[h]
+        if row_vals.max() == 0:
+            continue
+        tbl_rows.append([str(h)] + [f"{v:.1f}" for v in row_vals])
+    n_c = len(tbl_headers)
+    f_w = 22 * mm
+    r_w = (CONTENT_W - f_w) / (n_c - 1)
+    story.append(_data_table(
+        tbl_headers, tbl_rows,
+        col_widths=[f_w] + [r_w] * (n_c - 1),
+    ))
+
+    # 7c – System power (if losses > 0)
     if thermal_loss_pct > 0:
-        story.append(Paragraph("System Thermal Power (after loop losses) [kW]",
-                                styles["SubSection"]))
-        story.append(_hourly_profile_table(hourly_system_kw.round(1), label="kW"))
+        story.append(PageBreak())
+        story.append(Paragraph(
+            "System Thermal Power after Loop Losses [kW<sub>th</sub>]",
+            styles["SubSection"],
+        ))
+        story.append(_heatmap_image(
+            hourly_system_kw.round(1),
+            title=f"System Thermal Power [kW]  (after {thermal_loss_pct:.0f}% loop losses)",
+            unit_label="kW",
+            cmap="YlOrRd",
+            fig_width_mm=170,
+            fig_height_mm=110,
+        ))
+        story.append(Spacer(1, 4 * mm))
+
+        sys_tbl_rows = []
+        for h in hourly_system_kw.index:
+            row_vals = hourly_system_kw.loc[h]
+            if row_vals.max() == 0:
+                continue
+            sys_tbl_rows.append([str(h)] + [f"{v:.1f}" for v in row_vals])
+        story.append(_data_table(
+            tbl_headers, sys_tbl_rows,
+            col_widths=[f_w] + [r_w] * (n_c - 1),
+        ))
 
     # ================================================================
-    # DISCLAIMER / FOOTER
+    # DISCLAIMER
     # ================================================================
     story.append(Spacer(1, 10 * mm))
     story.append(HRFlowable(width="100%", thickness=0.5, color=BRAND_GREY))
