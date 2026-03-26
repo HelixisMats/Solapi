@@ -876,174 +876,155 @@ MONTHLY PRODUCTION (kWh)
             )
     
     # ========================================
-    # TAB 6: TORKNING (GRAIN DRYING)
+    # ========================================
+    # TAB 6: GRAIN DRYING — GAP-FILLING WORKFLOW
     # ========================================
 
     with tab6:
-        st.markdown("### 🌾 Grain Drying – Solar Heat Analysis")
+        st.markdown("### 🌾 Grain Drying – System Design")
         st.markdown(
-            "Calculate how solar heat, thermal storage and supplementary heat sources "
-            "can meet the drying energy demand during the harvest season."
+            "Design a complete heat supply system for grain drying. "
+            "Work through the five steps below to size solar, storage and backup "
+            "so that demand is reliably met across the full season."
         )
+        st.markdown("---")
 
-        # ── Period selection ──────────────────────────────────────
-        st.markdown("#### 📅 Drying Period")
+        # ════════════════════════════════════════════════════════════
+        # STEP 1 — DRYING DEMAND
+        # ════════════════════════════════════════════════════════════
+        st.markdown("#### 1️⃣  Define drying demand")
         MONTH_ORDER = list(DAYS_IN_MONTH.keys())
         col_p1, col_p2 = st.columns(2)
         with col_p1:
-            start_month = st.selectbox(
-                "Start month", MONTH_ORDER,
-                index=MONTH_ORDER.index("Aug"),
-                key="dry_start"
-            )
+            start_month = st.selectbox("Start month", MONTH_ORDER,
+                                        index=MONTH_ORDER.index("Aug"), key="dry_start")
         with col_p2:
-            end_month = st.selectbox(
-                "End month", MONTH_ORDER,
-                index=MONTH_ORDER.index("Sep"),
-                key="dry_end"
-            )
+            end_month = st.selectbox("End month", MONTH_ORDER,
+                                      index=MONTH_ORDER.index("Sep"), key="dry_end")
 
         start_idx = MONTH_ORDER.index(start_month)
         end_idx   = MONTH_ORDER.index(end_month)
         if end_idx < start_idx:
-            st.warning("⚠️ End month is before start month – please swap them.")
+            st.warning("⚠️ End month is before start month.")
             selected_months = []
         else:
             selected_months = MONTH_ORDER[start_idx : end_idx + 1]
             period_days = sum(DAYS_IN_MONTH[m] for m in selected_months)
-            st.info(
-                f"**Selected period:** {start_month} – {end_month} "
-                f"({len(selected_months)} months, {period_days} days)"
-            )
 
         if selected_months:
-            # ── Solar energy in period ───────────────────────────
-            period_solar_kwh = float(monthly_system_kwh[selected_months].sum())
-            period_daily_kwh = daily_system_kwh[selected_months]
-
-            # ── Drying demand ────────────────────────────────────
-            st.markdown("#### ⚡ Drying Energy Demand")
-            st.caption(
-                "Reference: a farm drying 10 000 tonnes/season typically requires ~1 MW "
-                "thermal over 6 weeks (Aug–Sep), consuming ~1 000 MWh of heat energy."
-            )
             col_d1, col_d2, col_d3 = st.columns(3)
             with col_d1:
-                grain_tonnes = st.number_input(
-                    "Grain to dry [tonnes]", min_value=0.1, value=10000.0, step=500.0,
-                    key="dry_tonnes"
-                )
+                grain_tonnes = st.number_input("Grain to dry [tonnes]",
+                                                min_value=0.1, value=10000.0, step=500.0, key="dry_tonnes")
             with col_d2:
-                mc_in = st.number_input(
-                    "Incoming moisture content [%]", min_value=1.0, max_value=40.0,
-                    value=20.0, step=0.5, key="dry_mc_in"
-                )
+                mc_in  = st.number_input("Incoming moisture [%]",
+                                          min_value=1.0, max_value=40.0, value=20.0, step=0.5, key="dry_mc_in")
             with col_d3:
-                mc_out = st.number_input(
-                    "Target moisture content [%]", min_value=1.0, max_value=30.0,
-                    value=14.0, step=0.5, key="dry_mc_out"
-                )
+                mc_out = st.number_input("Target moisture [%]",
+                                          min_value=1.0, max_value=30.0, value=14.0, step=0.5, key="dry_mc_out")
 
-            # Water to remove (wet basis)
             mc_in_f  = mc_in  / 100.0
             mc_out_f = mc_out / 100.0
             water_to_remove_kg = grain_tonnes * 1000.0 * (mc_in_f - mc_out_f) / (1.0 - mc_out_f)
-            # Specific energy for hot-air grain drying ≈ 1 430 kWh/ton water gives ~1 000 MWh for 10 000 t
             specific_energy_kwh_t = st.slider(
-                "Specific drying energy [kWh / tonne of water removed]",
-                min_value=600, max_value=2000, value=1430, step=50,
-                key="dry_specific",
-                help="Typically 800–1 500 kWh/tonne of water removed. Default calibrated to ~1 000 MWh for 10 000 t at 20→14 % MC."
+                "Specific drying energy [kWh / tonne water removed]",
+                min_value=600, max_value=2000, value=1430, step=50, key="dry_specific",
+                help="Typically 800–1 500 kWh/t. Default ≈ 1 000 MWh for 10 000 t at 20→14 % MC."
             )
-            total_drying_kwh = (water_to_remove_kg / 1000.0) * specific_energy_kwh_t
-            # Peak thermal power assuming uniform load over 6 weeks (42 days × 18 h/day)
-            peak_drying_kw = total_drying_kwh / (period_days * 18) if period_days > 0 else 0
+            total_drying_kwh  = (water_to_remove_kg / 1000.0) * specific_energy_kwh_t
+            daily_demand_kwh  = total_drying_kwh / period_days if period_days > 0 else 0
+            peak_drying_kw    = total_drying_kwh / (period_days * 18) if period_days > 0 else 0
 
-            col_r1, col_r2, col_r3, col_r4 = st.columns(4)
-            with col_r1:
-                st.metric("Water to remove", f"{water_to_remove_kg/1000:.1f} tonnes")
-            with col_r2:
-                st.metric("Total drying demand", f"{total_drying_kwh/1000:,.1f} MWh")
-            with col_r3:
-                st.metric("Avg. peak thermal load", f"{peak_drying_kw:,.0f} kW")
-            with col_r4:
-                solar_coverage_pct = min(period_solar_kwh / total_drying_kwh * 100, 100) \
-                    if total_drying_kwh > 0 else 0
-                st.metric("Solar heat covers", f"{solar_coverage_pct:.1f} %")
+            d1, d2, d3, d4 = st.columns(4)
+            d1.metric("Season",           f"{start_month}–{end_month}  ({period_days} days)")
+            d2.metric("Water to remove",  f"{water_to_remove_kg/1000:.1f} t")
+            d3.metric("Total demand",     f"{total_drying_kwh/1000:,.1f} MWh")
+            d4.metric("Avg daily demand", f"{daily_demand_kwh:,.0f} kWh/day")
+            st.markdown("---")
 
-            # ── LC24 HW unit sizing ──────────────────────────────
-            st.markdown("#### 🔆 LC24 HW Unit Sizing")
-            # Energy-based: how many LC24 units to cover the full drying demand
-            kwh_per_lc24 = float(monthly_system_kwh[selected_months].sum() / max(mirror_area, 1)) * APERTURE_24 \
-                if mirror_area > 0 else 0
+            # ════════════════════════════════════════════════════════════
+            # STEP 2 — SOLAR CONCENTRATORS
+            # ════════════════════════════════════════════════════════════
+            st.markdown("#### 2️⃣  Size solar concentrators")
+            st.caption(
+                "Solar yield per LC24 unit is taken from the uploaded DNI file. "
+                "Adjust the slider to find the right solar fraction."
+            )
+
+            kwh_per_lc24 = float(monthly_system_kwh[selected_months].sum()) / max(mirror_area, 1) * APERTURE_24 \
+                           if mirror_area > 0 else 0
             lc24_for_energy = math.ceil(total_drying_kwh / kwh_per_lc24) if kwh_per_lc24 > 0 else 0
-            # Peak-power-based: units to deliver the average peak thermal load
-            lc24_for_peak = math.ceil(peak_drying_kw / (APERTURE_24 * peak_kw_per_m2)) \
-                if peak_kw_per_m2 > 0 else 0
+            lc24_for_peak   = math.ceil(peak_drying_kw / (APERTURE_24 * peak_kw_per_m2)) \
+                              if peak_kw_per_m2 > 0 else 0
 
-            col_lc1, col_lc2, col_lc3 = st.columns(3)
-            with col_lc1:
-                st.metric(
-                    "LC24 units – full energy cover",
-                    f"{lc24_for_energy} units",
-                    help="Number of LC24 HW units whose seasonal output equals the total drying demand."
-                )
-            with col_lc2:
-                st.metric(
-                    "LC24 units – peak power cover",
-                    f"{lc24_for_peak} units",
-                    help="Number of LC24 HW units to deliver the average thermal peak load during daylight hours."
-                )
-            with col_lc3:
-                lc24_mirror_total = lc24_for_peak * APERTURE_24
-                st.metric(
-                    "Total mirror area (peak)",
-                    f"{lc24_mirror_total:,.0f} m²"
-                )
-            st.info(
-                f"💡 **Recommendation:** {lc24_for_peak} × LC24 HW units cover the ~{peak_drying_kw:,.0f} kW "
-                f"thermal peak load. Combined with thermal storage and a backup heater/heat pump, "
-                f"this can reliably supply the full {total_drying_kwh/1000:,.0f} MWh seasonal demand."
+            n_lc24 = st.slider(
+                "Number of LC24 HW units for grain drying",
+                min_value=1, max_value=max(200, lc24_for_energy * 2),
+                value=lc24_for_peak, key="dry_n_lc24",
+                help=f"Energy-only cover: {lc24_for_energy} units  |  Peak-power cover: {lc24_for_peak} units"
             )
 
-            daily_demand_kwh = total_drying_kwh / period_days if period_days > 0 else 0
+            scale_factor     = n_lc24 * APERTURE_24 / max(mirror_area, 1) if mirror_area > 0 else 0
+            period_solar_kwh = kwh_per_lc24 * n_lc24
+            solar_cover_pct  = min(period_solar_kwh / total_drying_kwh * 100, 100) if total_drying_kwh > 0 else 0
+            solar_gap_kwh    = max(total_drying_kwh - period_solar_kwh, 0)
 
-            # ── Dual thermal storage configuration ───────────────
-            st.markdown("#### 🛢️ Thermal Storage – Water & Oil Tanks")
-            st.markdown(
-                "Configure two storage media. Solar concentrators, heat pumps and electric "
-                "heaters each have a configurable split between the tanks. Discharge priority "
-                "is applied each day to meet the drying demand."
+            s1, s2, s3, s4 = st.columns(4)
+            s1.metric("Solar units",          f"{n_lc24} × LC24 HW")
+            s2.metric("Seasonal solar yield", f"{period_solar_kwh/1000:,.1f} MWh")
+            s3.metric("Solar covers",         f"{solar_cover_pct:.0f} %  of demand")
+            s4.metric("Gap to fill",          f"{solar_gap_kwh/1000:,.1f} MWh",
+                       delta="by storage + backup" if solar_gap_kwh > 0 else "✅ solar alone sufficient")
+
+            if solar_cover_pct < 100:
+                st.info(
+                    f"☀️ {n_lc24} units supply **{solar_cover_pct:.0f} %** of demand. "
+                    f"The remaining **{solar_gap_kwh/1000:,.1f} MWh** comes from storage and backup heat."
+                )
+            st.markdown("---")
+
+            # ════════════════════════════════════════════════════════════
+            # STEP 3 — THERMAL STORAGE
+            # ════════════════════════════════════════════════════════════
+            st.markdown("#### 3️⃣  Size thermal storage")
+            st.caption(
+                "Storage bridges the gap between when solar / cheap electricity is available "
+                "and when the dryer runs. More storage = fewer deficit days."
             )
 
             col_wh, col_oil = st.columns(2)
             with col_wh:
-                st.markdown("##### 💧 Water Tank  *(low-temp, 60–95 °C)*")
-                w_cap   = st.number_input("Capacity [kWh]",  min_value=0.0, value=500.0,  step=50.0,  key="w_cap")
-                w_eff   = st.slider("Round-trip efficiency [%]", 50, 99, 92, key="w_eff") / 100.0
-                w_prio  = st.radio("Discharge priority", ["First (primary)", "Second (backup)"],
+                st.markdown("##### 💧 Water tank  *(60–95 °C)*")
+                w_cap  = st.number_input("Capacity [kWh]", min_value=0.0, value=500.0, step=50.0, key="w_cap")
+                w_eff  = st.slider("Round-trip efficiency [%]", 50, 99, 92, key="w_eff") / 100.0
+                w_prio = st.radio("Discharge priority", ["First (primary)", "Second (backup)"],
                                    index=0, key="w_prio", horizontal=True)
             with col_oil:
-                st.markdown("##### 🛢️ Thermal Oil Tank  *(high-temp, 100–300 °C)*")
-                o_cap   = st.number_input("Capacity [kWh]",  min_value=0.0, value=300.0,  step=50.0,  key="o_cap")
-                o_eff   = st.slider("Round-trip efficiency [%]", 50, 99, 88, key="o_eff") / 100.0
-                st.markdown("*(Discharge priority follows water tank setting)*")
+                st.markdown("##### 🛢️ Oil tank  *(100–300 °C)*")
+                o_cap = st.number_input("Capacity [kWh]", min_value=0.0, value=300.0, step=50.0, key="o_cap")
+                o_eff = st.slider("Round-trip efficiency [%]", 50, 99, 88, key="o_eff") / 100.0
+                st.caption("Discharge priority is opposite to water tank")
 
-            water_first = (w_prio == "First (primary)")
-
-            # ── Heat sources ──────────────────────────────────────
-            st.markdown("#### 🔌 Heat Sources & Charging Split")
-            st.markdown(
-                "For each source, set the installed capacity and how the heat output is "
-                "split between the two tanks. Charging priority per day: "
-                "**Solar → Heat pump → Electric heater**."
+            water_first       = (w_prio == "First (primary)")
+            total_storage_kwh = (w_cap * w_eff) + (o_cap * o_eff)
+            storage_days      = total_storage_kwh / daily_demand_kwh if daily_demand_kwh > 0 else 0
+            st.caption(
+                f"Combined usable storage: **{total_storage_kwh:,.0f} kWh** — "
+                f"≈ **{storage_days:.1f} days** of drying demand without any other source."
             )
+            st.markdown("---")
+
+            # ════════════════════════════════════════════════════════════
+            # STEP 4 — BACKUP HEAT SOURCES
+            # ════════════════════════════════════════════════════════════
+            st.markdown("#### 4️⃣  Configure backup heat sources")
+            st.caption("Charging priority: **☀️ Solar → 🔄 Heat pump → ⚡ Electric boiler**")
 
             col_src1, col_src2, col_src3 = st.columns(3)
 
             with col_src1:
                 st.markdown("**☀️ Solar concentrators**")
-                st.caption(f"Available: {period_solar_kwh/period_days:,.0f} kWh/day (avg)")
+                st.caption(f"{period_solar_kwh/period_days:,.0f} kWh/day avg  ·  {n_lc24} units")
                 sol_w_pct = st.slider("→ Water tank [%]", 0, 100, 60, key="sol_w_pct")
                 sol_o_pct = 100 - sol_w_pct
                 st.caption(f"→ Oil tank: {sol_o_pct} %")
@@ -1052,11 +1033,11 @@ MONTHLY PRODUCTION (kWh)
                 st.markdown("**🔄 Heat pump**")
                 use_hp = st.checkbox("Enable", value=True, key="dry_use_hp")
                 if use_hp:
-                    cop        = st.number_input("COP", 1.0, 8.0, 3.5, 0.1, key="dry_hp_cop")
-                    hp_cap_kw  = st.number_input("Thermal capacity [kW]", 10.0, 2000.0, 200.0, 10.0, key="dry_hp_cap")
-                    hp_op_h    = st.slider("Operating hours/day", 1, 24, 16, key="dry_hp_h")
-                    hp_w_pct   = st.slider("→ Water tank [%]", 0, 100, 80, key="hp_w_pct")
-                    hp_o_pct   = 100 - hp_w_pct
+                    cop       = st.number_input("COP", 1.0, 8.0, 3.5, 0.1, key="dry_hp_cop")
+                    hp_cap_kw = st.number_input("Thermal capacity [kW]", 10.0, 2000.0, 200.0, 10.0, key="dry_hp_cap")
+                    hp_op_h   = st.slider("Operating hours/day", 1, 24, 16, key="dry_hp_h")
+                    hp_w_pct  = st.slider("→ Water tank [%]", 0, 100, 80, key="hp_w_pct")
+                    hp_o_pct  = 100 - hp_w_pct
                     st.caption(f"→ Oil tank: {hp_o_pct} %")
                     hp_day_kwh = hp_cap_kw * hp_op_h
                 else:
@@ -1064,13 +1045,12 @@ MONTHLY PRODUCTION (kWh)
                     hp_w_pct = hp_o_pct = 0
 
             with col_src3:
-                st.markdown("**⚡ Electric heater**")
+                st.markdown("**⚡ Electric boiler**")
                 use_el = st.checkbox("Enable", value=True, key="dry_use_el")
                 if use_el:
                     el_cap_kw = st.number_input("Thermal capacity [kW]", 10.0, 2000.0, 100.0, 10.0, key="dry_el_cap")
-                    el_op_h   = st.slider("Max operating hours/day", 1, 24, 8, key="dry_el_h")
+                    el_op_h   = st.slider("Max hours/day", 1, 24, 8, key="dry_el_h")
 
-                    # ── Spot price detection: accept any loaded source ──
                     _spot_src = None
                     if st.session_state.get("drying_spot_df") is not None:
                         _spot_src = st.session_state["drying_spot_df"]
@@ -1082,88 +1062,87 @@ MONTHLY PRODUCTION (kWh)
                             _kr_cols = [c for c in _full.columns if c.endswith("_kr_kwh")]
                             if _kr_cols:
                                 _spot_src = _full[["Tid", _kr_cols[0]]].rename(
-                                    columns={_kr_cols[0]: "spotpris"}
-                                )
+                                    columns={_kr_cols[0]: "spotpris"})
                     _spot_loaded = _spot_src is not None and len(_spot_src) > 0
 
                     if _spot_loaded:
-                        # Store for simulation use
                         st.session_state["drying_spot_df"] = _spot_src
                         _avg_ore = float(_spot_src["spotpris"].mean() * 100)
                         st.caption(f"✅ Spot prices loaded — avg {_avg_ore:.0f} öre/kWh")
                         el_threshold_ore = st.slider(
-                            "Run when spot price below [öre/kWh]",
+                            "Run when spot < [öre/kWh]",
                             min_value=10, max_value=300, value=100, step=5,
                             key="dry_el_threshold",
-                            help="Electric heater only runs on days where the average spot price is below this threshold."
+                            help="Boiler runs during hours with spot price below this level."
                         )
                     else:
-                        st.caption("⚠️ No spot prices loaded — load in ⚡ Spot Prices tab")
-                        el_threshold_ore = 999  # always run
+                        st.caption("⚠️ Load spot prices in ⚡ Spot Prices tab")
+                        el_threshold_ore = 999
 
-                    el_energy_tax_ore = st.number_input(
-                        "Energy tax [öre/kWh]", 0.0, 100.0, 43.9, 0.1,
-                        key="dry_el_tax",
-                        help="Energiskatt — 43.9 öre/kWh (2024)"
-                    )
-                    el_transfer_ore = st.number_input(
-                        "Transfer cost [öre/kWh]", 0.0, 100.0, 25.0, 0.5,
-                        key="dry_el_transfer",
-                        help="Överföringskostnad — typical 20–50 öre/kWh"
-                    )
+                    el_energy_tax_ore = st.number_input("Energy tax [öre/kWh]", 0.0, 100.0, 43.9, 0.1, key="dry_el_tax")
+                    el_transfer_ore   = st.number_input("Transfer cost [öre/kWh]", 0.0, 100.0, 25.0, 0.5, key="dry_el_transfer")
                     el_w_pct = st.slider("→ Water tank [%]", 0, 100, 40, key="el_w_pct")
                     el_o_pct = 100 - el_w_pct
                     st.caption(f"→ Oil tank: {el_o_pct} %")
                     el_day_kwh_max = el_cap_kw * el_op_h
                 else:
                     el_cap_kw = el_op_h = el_day_kwh_max = 0.0
-                    el_threshold_ore = 0
-                    el_energy_tax_ore = el_transfer_ore = 0.0
+                    el_threshold_ore = el_energy_tax_ore = el_transfer_ore = 0.0
                     el_w_pct = el_o_pct = 0
 
-            # ── Day-by-day simulation ─────────────────────────────
+            st.markdown("---")
+
+            # ════════════════════════════════════════════════════════════
+            # STEP 5 — SIMULATION & GAP ANALYSIS
+            # ════════════════════════════════════════════════════════════
+            st.markdown("#### 5️⃣  Gap analysis")
+
+            # Build daily lists
             daily_solar_list = []
             daily_dates_list = []
             for m in selected_months:
-                sol_day = float(daily_system_kwh[m])
+                sol_day = float(daily_system_kwh[m]) * scale_factor
                 for d in range(DAYS_IN_MONTH[m]):
                     daily_solar_list.append(sol_day)
-                    # Build a representative date for spot price lookup
                     mo_idx = MONTHS.index(m) + 1
                     daily_dates_list.append(date(2024, mo_idx, min(d + 1, DAYS_IN_MONTH[m])))
 
-            # Build daily average spot price map (kr/kWh → öre/kWh)
+            # Per-day eligible hours for electric boiler
             _spot_df_dry = st.session_state.get("drying_spot_df")
+            daily_el_kwh_map   = {}
+            daily_el_hours_map = {}
             daily_spot_ore_map = {}
-            if _spot_df_dry is not None and not _spot_df_dry.empty:
+            if use_el and _spot_df_dry is not None and len(_spot_df_dry) > 0:
                 _sdf = _spot_df_dry.copy()
-                _sdf["_date"] = pd.to_datetime(_sdf["Tid"]).dt.date
-                # Use month+day only (year-agnostic match)
-                _sdf["_md"] = _sdf["_date"].apply(lambda d: (d.month, d.day))
-                _md_avg = _sdf.groupby("_md")["spotpris"].mean() * 100  # → öre/kWh
-                daily_spot_ore_map = _md_avg.to_dict()
+                _sdf["Tid"]  = pd.to_datetime(_sdf["Tid"])
+                _sdf["_md"]  = _sdf["Tid"].apply(lambda t: (t.month, t.day))
+                _sdf["_ore"] = _sdf["spotpris"] * 100
+                for _md, _grp in _sdf.groupby("_md"):
+                    eligible = int((_grp["_ore"] < el_threshold_ore).sum())
+                    daily_el_kwh_map[_md]   = el_cap_kw * min(eligible, el_op_h)
+                    daily_el_hours_map[_md] = min(eligible, el_op_h)
+                    _cheap = _grp.loc[_grp["_ore"] < el_threshold_ore, "_ore"]
+                    daily_spot_ore_map[_md] = float(_cheap.mean()) if len(_cheap) > 0 else 0.0
 
+            # Day-by-day simulation
             soc_w, soc_o = 0.0, 0.0
-            sim = []   # one dict per day
-
+            sim = []
             for solar_day, sim_date in zip(daily_solar_list, daily_dates_list):
-                # Get spot price for this day (month, day)
                 md_key = (sim_date.month, sim_date.day)
-                day_spot_ore = daily_spot_ore_map.get(md_key, el_threshold_ore)  # fallback = threshold (always run)
+                if use_el and daily_el_kwh_map:
+                    el_day_kwh   = daily_el_kwh_map.get(md_key, 0.0)
+                    el_hours_day = daily_el_hours_map.get(md_key, 0)
+                    day_spot_ore = daily_spot_ore_map.get(md_key, 0.0)
+                elif use_el:
+                    el_day_kwh = el_day_kwh_max; el_hours_day = el_op_h; day_spot_ore = 0.0
+                else:
+                    el_day_kwh = el_hours_day = day_spot_ore = 0.0
 
-                # Electric heater runs only when spot < threshold
-                el_day_kwh = el_day_kwh_max if (use_el and day_spot_ore < el_threshold_ore) else 0.0
-
-                row = dict(
-                    solar=0.0, hp=0.0, el=0.0,
-                    dis_w=0.0, dis_o=0.0, deficit=0.0,
-                    soc_w=0.0, soc_o=0.0,
-                    spot_ore=day_spot_ore,
-                    el_enabled=(el_day_kwh > 0),
-                )
+                row = dict(solar=0.0, hp=0.0, el=0.0, dis_w=0.0, dis_o=0.0, deficit=0.0,
+                           soc_w=0.0, soc_o=0.0, spot_ore=day_spot_ore,
+                           el_hours=el_hours_day, el_enabled=(el_day_kwh > 0))
                 remaining_demand = daily_demand_kwh
 
-                # ── 1. CHARGING (priority: solar → HP → electric) ──
                 for src_kwh, w_frac, o_frac, src_key in [
                     (solar_day,                    sol_w_pct/100, sol_o_pct/100, "solar"),
                     (hp_day_kwh  if use_hp else 0, hp_w_pct/100,  hp_o_pct/100, "hp"),
@@ -1171,48 +1150,35 @@ MONTHLY PRODUCTION (kWh)
                 ]:
                     if src_kwh <= 0:
                         continue
-                    # Try to push directly to demand first, then overflow to tanks
                     direct = min(src_kwh, remaining_demand)
                     remaining_demand -= direct
                     row[src_key] += direct
-
                     leftover = src_kwh - direct
                     chg_w = min(leftover * w_frac, w_cap - soc_w)
                     chg_o = min(leftover * o_frac, o_cap - soc_o)
-                    # If split leaves unused capacity in one tank, spill to the other
                     spill = leftover - chg_w - chg_o
                     if spill > 0:
                         extra_w = min(spill, w_cap - soc_w - chg_w)
                         extra_o = min(spill - extra_w, o_cap - soc_o - chg_o)
-                        chg_w += extra_w
-                        chg_o += extra_o
-                    soc_w += chg_w
-                    soc_o += chg_o
-                    row[src_key] += chg_w + chg_o   # track total from this source
+                        chg_w += extra_w; chg_o += extra_o
+                    soc_w += chg_w; soc_o += chg_o
+                    row[src_key] += chg_w + chg_o
 
-                # ── 2. DISCHARGE (priority order per user setting) ──
-                tanks = (
-                    [("w", soc_w, w_cap, w_eff), ("o", soc_o, o_cap, o_eff)]
-                    if water_first
-                    else [("o", soc_o, o_cap, o_eff), ("w", soc_w, w_cap, w_eff)]
-                )
+                tanks = ([("w", soc_w, w_cap, w_eff), ("o", soc_o, o_cap, o_eff)] if water_first
+                         else [("o", soc_o, o_cap, o_eff), ("w", soc_w, w_cap, w_eff)])
                 for t_key, t_soc, t_cap, t_eff in tanks:
                     if remaining_demand <= 0:
                         break
-                    avail = t_soc * t_eff
-                    used  = min(avail, remaining_demand)
+                    used = min(t_soc * t_eff, remaining_demand)
                     drained = used / t_eff if t_eff > 0 else used
                     if t_key == "w":
-                        soc_w = max(soc_w - drained, 0)
-                        row["dis_w"] += used
+                        soc_w = max(soc_w - drained, 0); row["dis_w"] += used
                     else:
-                        soc_o = max(soc_o - drained, 0)
-                        row["dis_o"] += used
+                        soc_o = max(soc_o - drained, 0); row["dis_o"] += used
                     remaining_demand -= used
 
                 row["deficit"] = max(remaining_demand, 0)
-                row["soc_w"]   = soc_w
-                row["soc_o"]   = soc_o
+                row["soc_w"] = soc_w; row["soc_o"] = soc_o
                 sim.append(row)
 
             sim_df = pd.DataFrame(sim)
@@ -1225,154 +1191,165 @@ MONTHLY PRODUCTION (kWh)
             total_dis_w      = sim_df["dis_w"].sum()
             total_dis_o      = sim_df["dis_o"].sum()
             total_deficit    = sim_df["deficit"].sum()
-            total_supplied   = total_drying_kwh - total_deficit
-            coverage_pct     = min(total_supplied / total_drying_kwh * 100, 100) \
-                if total_drying_kwh > 0 else 0
+            coverage_pct     = min((total_drying_kwh - total_deficit) / total_drying_kwh * 100, 100) \
+                               if total_drying_kwh > 0 else 0
+            deficit_days     = int((sim_df["deficit"] > daily_demand_kwh * 0.05).sum())
 
-            # ── KPI row ───────────────────────────────────────────
-            st.markdown("#### 📊 Simulation Results")
-            kc = st.columns(5)
-            kc[0].metric("Overall coverage",       f"{coverage_pct:.1f} %")
-            kc[1].metric("Solar used",             f"{total_solar_used/1000:,.1f} MWh")
-            kc[2].metric("Heat pump used",         f"{total_hp_used/1000:,.1f} MWh")
-            kc[3].metric("Electric heater used",   f"{total_el_used/1000:,.1f} MWh")
-            kc[4].metric("Unmet deficit",          f"{total_deficit/1000:,.1f} MWh")
+            # KPI row
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.metric("✅ Coverage",         f"{coverage_pct:.1f} %")
+            k2.metric("☀️ Solar",            f"{total_solar_used/1000:,.1f} MWh",
+                       delta=f"{total_solar_used/total_drying_kwh*100:.0f} % of demand")
+            k3.metric("🔄 Heat pump",        f"{total_hp_used/1000:,.1f} MWh" if use_hp else "–")
+            k4.metric("⚡ Electric boiler",  f"{total_el_used/1000:,.1f} MWh" if use_el else "–")
+            k5.metric("⚠️ Deficit",          f"{deficit_days} days  /  {total_deficit/1000:,.1f} MWh",
+                       delta="✅ None" if deficit_days == 0 else "Increase storage or backup capacity")
 
-            kc2 = st.columns(4)
-            kc2[0].metric("Water tank discharge",  f"{total_dis_w/1000:,.1f} MWh")
-            kc2[1].metric("Oil tank discharge",    f"{total_dis_o/1000:,.1f} MWh")
-            kc2[2].metric("Days with deficit",     f"{(sim_df['deficit']>5).sum()} days")
-            kc2[3].metric("Max water SOC reached", f"{sim_df['soc_w'].max()/w_cap*100:.0f} %" if w_cap>0 else "–")
+            if coverage_pct < 95:
+                st.warning(
+                    f"⚠️ Coverage **{coverage_pct:.1f} %** — {deficit_days} days unmet. "
+                    "Increase solar units, storage capacity, or raise the boiler spot threshold."
+                )
+            else:
+                st.success(f"✅ Full season covered at **{coverage_pct:.1f} %**.")
 
-            # ── SOC chart ─────────────────────────────────────────
-            st.markdown("##### Storage State of Charge – daily evolution")
-            soc_chart = pd.DataFrame({
+            # Supply stack vs demand chart
+            st.markdown("##### Daily supply stack vs. demand")
+            st.caption(
+                "Stacked bars = heat from each source each day. "
+                "Red (deficit) = days the stack falls short of demand."
+            )
+            supply_chart = pd.DataFrame({
+                "☀️ Solar":           sim_df["solar"].clip(upper=daily_demand_kwh),
+                "💧 Water tank":      sim_df["dis_w"],
+                "🛢️ Oil tank":        sim_df["dis_o"],
+                "🔄 Heat pump":       sim_df["hp"].clip(upper=daily_demand_kwh),
+                "⚡ Electric boiler": sim_df["el"].clip(upper=daily_demand_kwh),
+                "⚠️ Deficit":         sim_df["deficit"],
+            }, index=sim_df.index)
+            st.bar_chart(supply_chart,
+                         color=["#F4A300","#2196F3","#FF8C00","#4CAF50","#E91E63","#EF5350"])
+            st.caption(
+                f"Daily demand line = **{daily_demand_kwh:,.0f} kWh/day**  ·  "
+                f"Solar surplus spilled (tanks full): "
+                f"**{max(period_solar_kwh - total_solar_used, 0)/1000:,.1f} MWh**"
+            )
+
+            # Storage SOC
+            st.markdown("##### Storage state of charge")
+            st.line_chart(pd.DataFrame({
                 "Water tank [kWh]": sim_df["soc_w"],
                 "Oil tank [kWh]":   sim_df["soc_o"],
-            })
-            st.line_chart(soc_chart, color=["#2196F3", "#F4A300"])
+            }, index=sim_df.index), color=["#2196F3","#FF8C00"])
+            st.caption(
+                f"Max water SOC: **{sim_df['soc_w'].max():,.0f} / {w_cap:.0f} kWh**  ·  "
+                f"Max oil SOC: **{sim_df['soc_o'].max():,.0f} / {o_cap:.0f} kWh**"
+            )
 
-            # ── Daily energy-flow chart ───────────────────────────
-            st.markdown("##### Daily energy flows [kWh]")
-            flow_chart = pd.DataFrame({
-                "Solar direct":        sim_df["solar"].clip(upper=daily_demand_kwh),
-                "Water tank out":      sim_df["dis_w"],
-                "Oil tank out":        sim_df["dis_o"],
-                "Heat pump":           sim_df["hp"].clip(upper=daily_demand_kwh),
-                "Electric heater":     sim_df["el"].clip(upper=daily_demand_kwh),
-            })
-            st.bar_chart(flow_chart, color=["#F4A300","#2196F3","#FF8C00","#4CAF50","#E91E63"])
+            # Electric boiler operating summary
+            el_days_total  = len(sim_df)
+            el_days_active = int(sim_df["el_enabled"].sum()) if "el_enabled" in sim_df.columns else 0
+            total_el_hours = int(sim_df["el_hours"].sum()) if "el_hours" in sim_df.columns else 0
+            _active_rows   = sim_df[sim_df["el_enabled"] == True]
+            avg_spot_ore   = float(_active_rows["spot_ore"].mean()) if len(_active_rows) > 0 else 0.0
 
-            # ── Economics ─────────────────────────────────────────
-            st.markdown("#### 💰 Economic Comparison")
+            if use_el and total_el_used > 0:
+                st.markdown("##### ⚡ Electric boiler — spot-price operation")
+                eb1, eb2, eb3 = st.columns(3)
+                eb1.metric("Eligible hours",
+                           f"{total_el_hours:,} h  ({el_days_active} days)",
+                           delta=f"spot < {el_threshold_ore} öre/kWh")
+                eb2.metric("Heat produced",
+                           f"{total_el_used:,.0f} kWh",
+                           delta=f"{el_cap_kw:.0f} kW × {total_el_hours:,} h")
+                eb3.metric("Avg spot during operation", f"{avg_spot_ore:.0f} öre/kWh")
+
+            st.markdown("---")
+
+            # ════════════════════════════════════════════════════════════
+            # STEP 6 — ECONOMICS
+            # ════════════════════════════════════════════════════════════
+            st.markdown("#### 6️⃣  Economics")
+
             pellets_price = st.number_input(
-                "Reference price pellets / fuel oil [€/kWh]", min_value=0.01, value=0.08,
-                step=0.01, key="dry_pellets"
+                "Reference fuel price [€/kWh]  (pellets / fuel oil)",
+                min_value=0.01, value=0.08, step=0.01, key="dry_pellets"
             )
             ref_cost = total_drying_kwh * pellets_price
 
-            hp_el_kwh = total_hp_used / cop if (use_hp and cop > 0) else 0.0
-            # HP electricity price: use spot average if available, else energy tax + transfer only
-            _hp_spot_src = st.session_state.get("drying_spot_df")
-            hp_spot_eur = float(_hp_spot_src["spotpris"].mean()) if _hp_spot_src is not None else 0.10
-            hp_cost = hp_el_kwh * hp_spot_eur
+            hp_el_kwh   = total_hp_used / cop if (use_hp and cop > 0) else 0.0
+            _hp_spot    = st.session_state.get("drying_spot_df")
+            hp_spot_eur = float(_hp_spot["spotpris"].mean()) if _hp_spot is not None else 0.10
+            hp_cost     = hp_el_kwh * hp_spot_eur
 
-            # Electric heater cost: weighted actual spot + fixed tax + transfer
             if use_el and total_el_used > 0:
-                # Weighted average spot price over days heater ran
-                _el_rows = sim_df[sim_df["el_enabled"] == True] if "el_enabled" in sim_df.columns else sim_df
-                avg_spot_ore = _el_rows["spot_ore"].mean() if len(_el_rows) > 0 else el_threshold_ore
-                el_spot_cost  = total_el_used * avg_spot_ore / 100       # spot energy cost
-                el_tax_cost   = total_el_used * el_energy_tax_ore / 100  # energiskatt
-                el_trans_cost = total_el_used * el_transfer_ore / 100    # överföring
-                el_total_cost = el_spot_cost + el_tax_cost + el_trans_cost
+                el_spot_cost     = total_el_used * avg_spot_ore / 100
+                el_tax_cost      = total_el_used * el_energy_tax_ore / 100
+                el_trans_cost    = total_el_used * el_transfer_ore / 100
+                el_total_cost    = el_spot_cost + el_tax_cost + el_trans_cost
                 el_avg_total_ore = avg_spot_ore + el_energy_tax_ore + el_transfer_ore
             else:
                 el_spot_cost = el_tax_cost = el_trans_cost = el_total_cost = 0.0
-                avg_spot_ore = 0.0
                 el_avg_total_ore = 0.0
 
-            backup_cost = hp_cost + el_total_cost
-            savings     = ref_cost - backup_cost
+            backup_cost  = hp_cost + el_total_cost
+            savings      = ref_cost - backup_cost
+            total_supplied = total_drying_kwh - total_deficit
 
-            # How many days did the heater actually run?
-            el_days_active = int(sim_df["el_enabled"].sum()) if "el_enabled" in sim_df.columns else 0
-            el_days_total  = len(sim_df)
+            ec1, ec2, ec3, ec4 = st.columns(4)
+            ec1.metric("Reference (all fuel)",  f"{ref_cost:,.0f} €",
+                       delta=f"@ {pellets_price:.2f} €/kWh")
+            ec2.metric("Backup operating cost", f"{backup_cost:,.0f} €",
+                       delta=f"savings {savings:,.0f} €" if savings >= 0 else f"overshoot {-savings:,.0f} €",
+                       delta_color="normal" if savings >= 0 else "inverse")
+            ec3.metric("Solar avoided fuel",
+                       f"{total_solar_used * pellets_price:,.0f} €",
+                       delta=f"{total_solar_used/1000:,.1f} MWh × {pellets_price:.2f} €")
+            ec4.metric("Cost / MWh delivered",
+                       f"{backup_cost / max(total_supplied/1000, 0.001):,.1f} €/MWh")
 
-            col_e1, col_e2, col_e3, col_e4 = st.columns(4)
-            col_e1.metric("Cost – all pellets/fuel",   f"{ref_cost:,.0f} €")
-            col_e2.metric("Backup operating cost",     f"{backup_cost:,.0f} €",
-                          delta=f"-{savings:,.0f} € vs pellets" if savings > 0 else None)
-            col_e3.metric("Avoided fuel cost (solar)", f"{total_solar_used * pellets_price:,.0f} €")
-            col_e4.metric("HP electricity cost",       f"{hp_cost:,.0f} €")
+            with st.expander("📋 Full cost breakdown"):
+                st.dataframe(pd.DataFrame({
+                    "Item": [
+                        "Total drying demand",
+                        "  ☀️ Solar contribution",
+                        "  🔄 Heat pump",
+                        "  ⚡ Electric boiler",
+                        "  💧 Water tank discharge",
+                        "  🛢️ Oil tank discharge",
+                        "Unmet deficit",
+                        "Season coverage",
+                        "—",
+                        "Reference cost (all fuel)",
+                        "  ⚡ Boiler – spot electricity",
+                        "  ⚡ Boiler – energy tax",
+                        "  ⚡ Boiler – transfer cost",
+                        "  ⚡ Boiler – total",
+                        "  🔄 Heat pump electricity",
+                        "Total backup cost",
+                        "Net savings vs. reference",
+                    ],
+                    "Value": [
+                        f"{total_drying_kwh/1000:,.1f} MWh",
+                        f"{total_solar_used/1000:,.1f} MWh  ({total_solar_used/total_drying_kwh*100:.0f} %)" if total_drying_kwh > 0 else "–",
+                        f"{total_hp_used/1000:,.1f} MWh" if use_hp else "–",
+                        f"{total_el_used/1000:,.1f} MWh  ({el_days_active} days, {total_el_hours} h)" if use_el else "–",
+                        f"{total_dis_w/1000:,.1f} MWh",
+                        f"{total_dis_o/1000:,.1f} MWh",
+                        f"{total_deficit/1000:,.1f} MWh  ({deficit_days} days)" if total_deficit > 0 else "None ✅",
+                        f"{coverage_pct:.1f} %",
+                        "",
+                        f"{ref_cost:,.0f} €",
+                        f"{el_spot_cost:,.0f} €  (avg {avg_spot_ore:.0f} öre/kWh)" if use_el else "–",
+                        f"{el_tax_cost:,.0f} €  ({el_energy_tax_ore:.1f} öre/kWh)" if use_el else "–",
+                        f"{el_trans_cost:,.0f} €  ({el_transfer_ore:.1f} öre/kWh)" if use_el else "–",
+                        f"{el_total_cost:,.0f} €  ({el_avg_total_ore:.0f} öre/kWh all-in)" if use_el else "–",
+                        f"{hp_cost:,.0f} €  ({hp_spot_eur*100:.0f} öre/kWh avg spot)" if use_hp else "–",
+                        f"{backup_cost:,.0f} €",
+                        f"{savings:,.0f} €",
+                    ]
+                }), use_container_width=True, hide_index=True)
 
-            # Electric heater cost breakdown
-            if use_el and total_el_used > 0:
-                st.markdown("##### ⚡ Electric heater cost breakdown")
-                eb1, eb2, eb3, eb4, eb5 = st.columns(5)
-                eb1.metric("Heater active days",
-                           f"{el_days_active} / {el_days_total}",
-                           delta=f"spot < {el_threshold_ore} öre/kWh")
-                eb2.metric("Total el. consumed",   f"{total_el_used:,.0f} kWh")
-                eb3.metric(f"Spot cost (avg {avg_spot_ore:.0f} öre)",
-                           f"{el_spot_cost:,.0f} €")
-                eb4.metric(f"Tax ({el_energy_tax_ore:.1f}) + Transfer ({el_transfer_ore:.1f} öre)",
-                           f"{el_tax_cost + el_trans_cost:,.0f} €")
-                eb5.metric(f"Total el. cost  ({el_avg_total_ore:.0f} öre/kWh avg)",
-                           f"{el_total_cost:,.0f} €")
-
-            # ── Summary table ─────────────────────────────────────
-            st.markdown("#### 📋 Full System Summary")
-            summary_rows = {
-                "Item": [
-                    "Total drying demand",
-                    "  ☀️ Solar (direct + stored)",
-                    "  🔄 Heat pump contribution",
-                    "  ⚡ Electric heater contribution",
-                    "  💧 Water tank net discharge",
-                    "  🛢️ Oil tank net discharge",
-                    "Unmet deficit",
-                    "Overall coverage",
-                    "Reference cost (all pellets)",
-                    "  El. heater – spot cost",
-                    "  El. heater – energy tax",
-                    "  El. heater – transfer cost",
-                    "  Heat pump cost",
-                    "Total backup operating cost",
-                    "Net savings vs. reference",
-                ],
-                "Value": [
-                    f"{total_drying_kwh/1000:,.1f} MWh",
-                    f"{total_solar_used/1000:,.1f} MWh  ({total_solar_used/total_drying_kwh*100:.0f} %)" if total_drying_kwh > 0 else "–",
-                    f"{total_hp_used/1000:,.1f} MWh" if use_hp else "–",
-                    f"{total_el_used/1000:,.1f} MWh  ({el_days_active} days active)" if use_el else "–",
-                    f"{total_dis_w/1000:,.1f} MWh",
-                    f"{total_dis_o/1000:,.1f} MWh",
-                    f"{total_deficit/1000:,.1f} MWh  ({total_deficit/total_drying_kwh*100:.1f} %)" if total_drying_kwh > 0 else "–",
-                    f"{coverage_pct:.1f} %",
-                    f"{ref_cost:,.0f} €",
-                    f"{el_spot_cost:,.0f} €  (avg {avg_spot_ore:.0f} öre/kWh)" if use_el else "–",
-                    f"{el_tax_cost:,.0f} €  ({el_energy_tax_ore:.1f} öre/kWh)" if use_el else "–",
-                    f"{el_trans_cost:,.0f} €  ({el_transfer_ore:.1f} öre/kWh)" if use_el else "–",
-                    f"{hp_cost:,.0f} €" if use_hp else "–",
-                    f"{backup_cost:,.0f} €",
-                    f"{savings:,.0f} €",
-                ]
-            }
-            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
-
-            # ── Monthly solar vs demand bar chart ─────────────────
-            st.markdown("#### 📊 Monthly Solar Heat vs. Drying Demand")
-            monthly_demand_kwh_per = total_drying_kwh / len(selected_months) if selected_months else 0
-            chart_df = pd.DataFrame({
-                "Month":                selected_months,
-                "Solar heat [kWh]":    [float(monthly_system_kwh[m]) for m in selected_months],
-                "Drying demand [kWh]": [monthly_demand_kwh_per] * len(selected_months),
-            })
-            st.bar_chart(chart_df.set_index("Month"), color=["#F4A300", "#2196F3"])
-
-
-    # ========================================
     # TAB 7: SPOT PRICES
     # ========================================
 
