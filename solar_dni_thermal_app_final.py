@@ -24,6 +24,7 @@ def _add_spot_log(msg):
 
 def fetch_spotprices_entsoe(api_key: str, area: str, start_date: str, end_date: str) -> pd.DataFrame:
     """Fetch spot prices from ENTSO-E Transparency Platform."""
+    import time
     if not api_key:
         api_key = ENTSOE_API_KEY
     try:
@@ -36,7 +37,32 @@ def fetch_spotprices_entsoe(api_key: str, area: str, start_date: str, end_date: 
     client = EntsoePandasClient(api_key=api_key)
     start = pd.Timestamp(start_date, tz='Europe/Stockholm')
     end   = pd.Timestamp(end_date,   tz='Europe/Stockholm') + pd.Timedelta(days=1)
-    prices = client.query_day_ahead_prices(area_codes[area], start=start, end=end)
+
+    # Retry up to 3 times with backoff — ENTSO-E occasionally returns 503
+    last_err = None
+    for attempt in range(3):
+        try:
+            prices = client.query_day_ahead_prices(area_codes[area], start=start, end=end)
+            break
+        except Exception as e:
+            last_err = e
+            if "503" in str(e) or "502" in str(e) or "504" in str(e):
+                if attempt < 2:
+                    time.sleep(3 * (attempt + 1))
+                    continue
+            raise RuntimeError(
+                f"ENTSO-E API error: {e}  \n\n"
+                "**Tip:** ENTSO-E occasionally goes down for maintenance. "
+                "Wait a minute and try again, or upload the `spotpriser_2023_2026.csv` "
+                "file from the battery simulation app instead."
+            )
+    else:
+        raise RuntimeError(
+            f"ENTSO-E returned a server error after 3 attempts: {last_err}  \n\n"
+            "The ENTSO-E Transparency Platform appears to be temporarily unavailable. "
+            "Please try again in a few minutes, or upload the `spotpriser_2023_2026.csv` file instead."
+        )
+
     df = prices.reset_index()
     df.columns = ['Tid', 'spotpris_eur_mwh']
     try:
@@ -1043,32 +1069,87 @@ MONTHLY PRODUCTION (kWh)
                 use_el = st.checkbox("Enable", value=True, key="dry_use_el")
                 if use_el:
                     el_cap_kw  = st.number_input("Thermal capacity [kW]", 10.0, 2000.0, 100.0, 10.0, key="dry_el_cap")
-                    el_op_h    = st.slider("Operating hours/day", 1, 24, 8, key="dry_el_h")
-                    el_price   = st.number_input("Electricity price [€/kWh]", 0.01, 1.0, 0.12, 0.01, key="dry_el_price")
+                    el_op_h    = st.slider("Max operating hours/day", 1, 24, 8, key="dry_el_h")
+
+                    # ── Spot price threshold ──
+                    _spot_loaded = st.session_state.get("drying_spot_df") is not None
+                    if _spot_loaded:
+                        st.caption("✅ Spot prices loaded from ⚡ Spot Prices tab")
+                        el_threshold_ore = st.slider(
+                            "Run when spot price below [öre/kWh]",
+                            min_value=10, max_value=300, value=100, step=5,
+                            key="dry_el_threshold",
+                            help="Electric heater only runs on days where the average spot price is below this threshold."
+                        )
+                    else:
+                        st.caption("⚠️ No spot prices loaded — using fixed price fallback")
+                        el_threshold_ore = 999  # always run if no spot data
+                        el_price_fallback = st.number_input(
+                            "Electricity spot price [€/kWh]", 0.01, 1.0, 0.12, 0.01,
+                            key="dry_el_price"
+                        )
+
+                    # ── Electricity cost components ──
+                    el_energy_tax_ore = st.number_input(
+                        "Energy tax [öre/kWh]", 0.0, 100.0, 43.9, 0.1,
+                        key="dry_el_tax",
+                        help="Energiskatt — 43.9 öre/kWh (2024)"
+                    )
+                    el_transfer_ore = st.number_input(
+                        "Transfer cost [öre/kWh]", 0.0, 100.0, 25.0, 0.5,
+                        key="dry_el_transfer",
+                        help="Överföringskostnad — typical 20–50 öre/kWh"
+                    )
+
                     el_w_pct   = st.slider("→ Water tank [%]", 0, 100, 40, key="el_w_pct")
                     el_o_pct   = 100 - el_w_pct
                     st.caption(f"→ Oil tank: {el_o_pct} %")
-                    el_day_kwh = el_cap_kw * el_op_h
+                    el_day_kwh_max = el_cap_kw * el_op_h   # maximum if heater runs
                 else:
-                    el_cap_kw = el_op_h = el_price = el_day_kwh = 0.0
+                    el_cap_kw = el_op_h = el_day_kwh_max = 0.0
+                    el_threshold_ore = 0
+                    el_energy_tax_ore = el_transfer_ore = 0.0
                     el_w_pct = el_o_pct = 0
 
             # ── Day-by-day simulation ─────────────────────────────
             daily_solar_list = []
+            daily_dates_list = []
             for m in selected_months:
                 sol_day = float(daily_system_kwh[m])
-                for _ in range(DAYS_IN_MONTH[m]):
+                for d in range(DAYS_IN_MONTH[m]):
                     daily_solar_list.append(sol_day)
+                    # Build a representative date for spot price lookup
+                    mo_idx = MONTHS.index(m) + 1
+                    daily_dates_list.append(date(2024, mo_idx, min(d + 1, DAYS_IN_MONTH[m])))
+
+            # Build daily average spot price map (kr/kWh → öre/kWh)
+            _spot_df_dry = st.session_state.get("drying_spot_df")
+            daily_spot_ore_map = {}
+            if _spot_df_dry is not None and not _spot_df_dry.empty:
+                _sdf = _spot_df_dry.copy()
+                _sdf["_date"] = pd.to_datetime(_sdf["Tid"]).dt.date
+                # Use month+day only (year-agnostic match)
+                _sdf["_md"] = _sdf["_date"].apply(lambda d: (d.month, d.day))
+                _md_avg = _sdf.groupby("_md")["spotpris"].mean() * 100  # → öre/kWh
+                daily_spot_ore_map = _md_avg.to_dict()
 
             soc_w, soc_o = 0.0, 0.0
-
             sim = []   # one dict per day
 
-            for solar_day in daily_solar_list:
+            for solar_day, sim_date in zip(daily_solar_list, daily_dates_list):
+                # Get spot price for this day (month, day)
+                md_key = (sim_date.month, sim_date.day)
+                day_spot_ore = daily_spot_ore_map.get(md_key, el_threshold_ore)  # fallback = threshold (always run)
+
+                # Electric heater runs only when spot < threshold
+                el_day_kwh = el_day_kwh_max if (use_el and day_spot_ore < el_threshold_ore) else 0.0
+
                 row = dict(
                     solar=0.0, hp=0.0, el=0.0,
                     dis_w=0.0, dis_o=0.0, deficit=0.0,
                     soc_w=0.0, soc_o=0.0,
+                    spot_ore=day_spot_ore,
+                    el_enabled=(el_day_kwh > 0),
                 )
                 remaining_demand = daily_demand_kwh
 
@@ -1076,7 +1157,7 @@ MONTHLY PRODUCTION (kWh)
                 for src_kwh, w_frac, o_frac, src_key in [
                     (solar_day,                    sol_w_pct/100, sol_o_pct/100, "solar"),
                     (hp_day_kwh  if use_hp else 0, hp_w_pct/100,  hp_o_pct/100, "hp"),
-                    (el_day_kwh  if use_el else 0, el_w_pct/100,  el_o_pct/100, "el"),
+                    (el_day_kwh,                   el_w_pct/100,  el_o_pct/100, "el"),
                 ]:
                     if src_kwh <= 0:
                         continue
@@ -1180,12 +1261,30 @@ MONTHLY PRODUCTION (kWh)
             )
             ref_cost = total_drying_kwh * pellets_price
 
-            hp_el_kwh   = total_hp_used / cop if (use_hp and cop > 0) else 0.0
-            el_el_kwh   = total_el_used          # electric heater is 1:1
-            hp_cost     = hp_el_kwh * (hp_price if use_hp else 0)
-            el_cost     = el_el_kwh * (el_price if use_el else 0)
-            backup_cost = hp_cost + el_cost
+            hp_el_kwh = total_hp_used / cop if (use_hp and cop > 0) else 0.0
+            hp_cost   = hp_el_kwh * (hp_price if use_hp else 0)
+
+            # Electric heater cost: weighted actual spot + fixed tax + transfer
+            if use_el and total_el_used > 0:
+                # Weighted average spot price over days heater ran
+                _el_rows = sim_df[sim_df["el_enabled"] == True] if "el_enabled" in sim_df.columns else sim_df
+                avg_spot_ore = _el_rows["spot_ore"].mean() if len(_el_rows) > 0 else el_threshold_ore
+                el_spot_cost  = total_el_used * avg_spot_ore / 100       # spot energy cost
+                el_tax_cost   = total_el_used * el_energy_tax_ore / 100  # energiskatt
+                el_trans_cost = total_el_used * el_transfer_ore / 100    # överföring
+                el_total_cost = el_spot_cost + el_tax_cost + el_trans_cost
+                el_avg_total_ore = avg_spot_ore + el_energy_tax_ore + el_transfer_ore
+            else:
+                el_spot_cost = el_tax_cost = el_trans_cost = el_total_cost = 0.0
+                avg_spot_ore = 0.0
+                el_avg_total_ore = 0.0
+
+            backup_cost = hp_cost + el_total_cost
             savings     = ref_cost - backup_cost
+
+            # How many days did the heater actually run?
+            el_days_active = int(sim_df["el_enabled"].sum()) if "el_enabled" in sim_df.columns else 0
+            el_days_total  = len(sim_df)
 
             col_e1, col_e2, col_e3, col_e4 = st.columns(4)
             col_e1.metric("Cost – all pellets/fuel",   f"{ref_cost:,.0f} €")
@@ -1193,6 +1292,21 @@ MONTHLY PRODUCTION (kWh)
                           delta=f"-{savings:,.0f} € vs pellets" if savings > 0 else None)
             col_e3.metric("Avoided fuel cost (solar)", f"{total_solar_used * pellets_price:,.0f} €")
             col_e4.metric("HP electricity cost",       f"{hp_cost:,.0f} €")
+
+            # Electric heater cost breakdown
+            if use_el and total_el_used > 0:
+                st.markdown("##### ⚡ Electric heater cost breakdown")
+                eb1, eb2, eb3, eb4, eb5 = st.columns(5)
+                eb1.metric("Heater active days",
+                           f"{el_days_active} / {el_days_total}",
+                           delta=f"spot < {el_threshold_ore} öre/kWh")
+                eb2.metric("Total el. consumed",   f"{total_el_used:,.0f} kWh")
+                eb3.metric(f"Spot cost (avg {avg_spot_ore:.0f} öre)",
+                           f"{el_spot_cost:,.0f} €")
+                eb4.metric(f"Tax ({el_energy_tax_ore:.1f}) + Transfer ({el_transfer_ore:.1f} öre)",
+                           f"{el_tax_cost + el_trans_cost:,.0f} €")
+                eb5.metric(f"Total el. cost  ({el_avg_total_ore:.0f} öre/kWh avg)",
+                           f"{el_total_cost:,.0f} €")
 
             # ── Summary table ─────────────────────────────────────
             st.markdown("#### 📋 Full System Summary")
@@ -1207,19 +1321,27 @@ MONTHLY PRODUCTION (kWh)
                     "Unmet deficit",
                     "Overall coverage",
                     "Reference cost (all pellets)",
-                    "Backup operating cost (HP + el.)",
+                    "  El. heater – spot cost",
+                    "  El. heater – energy tax",
+                    "  El. heater – transfer cost",
+                    "  Heat pump cost",
+                    "Total backup operating cost",
                     "Net savings vs. reference",
                 ],
                 "Value": [
                     f"{total_drying_kwh/1000:,.1f} MWh",
                     f"{total_solar_used/1000:,.1f} MWh  ({total_solar_used/total_drying_kwh*100:.0f} %)" if total_drying_kwh > 0 else "–",
                     f"{total_hp_used/1000:,.1f} MWh" if use_hp else "–",
-                    f"{total_el_used/1000:,.1f} MWh" if use_el else "–",
+                    f"{total_el_used/1000:,.1f} MWh  ({el_days_active} days active)" if use_el else "–",
                     f"{total_dis_w/1000:,.1f} MWh",
                     f"{total_dis_o/1000:,.1f} MWh",
                     f"{total_deficit/1000:,.1f} MWh  ({total_deficit/total_drying_kwh*100:.1f} %)" if total_drying_kwh > 0 else "–",
                     f"{coverage_pct:.1f} %",
                     f"{ref_cost:,.0f} €",
+                    f"{el_spot_cost:,.0f} €  (avg {avg_spot_ore:.0f} öre/kWh)" if use_el else "–",
+                    f"{el_tax_cost:,.0f} €  ({el_energy_tax_ore:.1f} öre/kWh)" if use_el else "–",
+                    f"{el_trans_cost:,.0f} €  ({el_transfer_ore:.1f} öre/kWh)" if use_el else "–",
+                    f"{hp_cost:,.0f} €" if use_hp else "–",
                     f"{backup_cost:,.0f} €",
                     f"{savings:,.0f} €",
                 ]
