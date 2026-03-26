@@ -3,9 +3,202 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import math
+import requests
+import io
+import os
+from datetime import datetime, timedelta, date
 from report_generator import generate_report
 
 st.set_page_config(layout="wide")
+
+# -------------------------------------------------
+# Spot Price Constants & Helpers
+# -------------------------------------------------
+
+ENTSOE_API_KEY = "55dfa98f-792a-45fd-8170-89febe6fdbaa"
+
+def _add_spot_log(msg):
+    if "spot_log" not in st.session_state:
+        st.session_state["spot_log"] = []
+    st.session_state["spot_log"].append(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+
+def fetch_spotprices_entsoe(api_key: str, area: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """Fetch spot prices from ENTSO-E Transparency Platform."""
+    if not api_key:
+        api_key = ENTSOE_API_KEY
+    try:
+        from entsoe import EntsoePandasClient
+    except ImportError:
+        raise ImportError("entsoe-py not installed.")
+    area_codes = {'SE1': 'SE_1', 'SE2': 'SE_2', 'SE3': 'SE_3', 'SE4': 'SE_4'}
+    if area not in area_codes:
+        raise ValueError(f"Invalid area: {area}")
+    client = EntsoePandasClient(api_key=api_key)
+    start = pd.Timestamp(start_date, tz='Europe/Stockholm')
+    end   = pd.Timestamp(end_date,   tz='Europe/Stockholm') + pd.Timedelta(days=1)
+    prices = client.query_day_ahead_prices(area_codes[area], start=start, end=end)
+    df = prices.reset_index()
+    df.columns = ['Tid', 'spotpris_eur_mwh']
+    try:
+        r = requests.get(
+            f"https://api.riksbank.se/swea/v1/CrossRates/SEKEURPMI/{start_date}/{end_date}",
+            timeout=15
+        )
+        if r.status_code == 200:
+            rate_map = {pd.Timestamp(d['date']).date(): float(d['value']) for d in r.json()}
+            df['EUR_SEK'] = df['Tid'].dt.date.map(rate_map)
+            df['EUR_SEK'] = df['EUR_SEK'].ffill().bfill()
+        else:
+            df['EUR_SEK'] = 11.20
+    except Exception:
+        df['EUR_SEK'] = 11.20
+    df['spotpris'] = df['spotpris_eur_mwh'] * df['EUR_SEK'] / 1000
+    df['Tid'] = df['Tid'].dt.tz_localize(None)
+    return df[['Tid', 'spotpris']].copy()
+
+
+def _extend_spot_with_live_data(spot_df_full: pd.DataFrame) -> pd.DataFrame:
+    """Extend spot data with live ENTSO-E data up to today/tomorrow."""
+    now    = datetime.now()
+    today  = now.date()
+    target = today + timedelta(days=1) if now.hour >= 13 else today
+    actual_last = spot_df_full['Tid'].max().date()
+    if st.session_state.get('spot_live_extended_to') == str(target) and actual_last >= target:
+        return spot_df_full
+    if actual_last >= target:
+        st.session_state['spot_live_extended_to'] = str(target)
+        return spot_df_full
+    fetch_from = actual_last + timedelta(days=1)
+    fetch_to   = target
+    _add_spot_log(f"Fetching missing spot prices {fetch_from} to {fetch_to} via ENTSO-E...")
+    last_rate = float(spot_df_full['EUR_SEK'].iloc[-1]) if 'EUR_SEK' in spot_df_full.columns else 11.20
+    fx_series = {}
+    try:
+        fx_resp = requests.get(
+            f"https://api.frankfurter.app/{fetch_from}..{fetch_to}?from=EUR&to=SEK", timeout=15
+        )
+        fx_resp.raise_for_status()
+        fx_rates = fx_resp.json().get("rates", {})
+        d = fetch_from
+        while d <= fetch_to:
+            if str(d) in fx_rates:
+                last_rate = fx_rates[str(d)].get('SEK', last_rate)
+            fx_series[d] = last_rate
+            d += timedelta(days=1)
+    except Exception:
+        d = fetch_from
+        while d <= fetch_to:
+            fx_series[d] = last_rate
+            d += timedelta(days=1)
+    try:
+        from entsoe import EntsoePandasClient
+        import pytz
+        tz_se = pytz.timezone("Europe/Stockholm")
+        client = EntsoePandasClient(api_key=ENTSOE_API_KEY)
+        _start_ts = pd.Timestamp(str(fetch_from), tz=tz_se)
+        _end_ts   = pd.Timestamp(str(fetch_to) + " 23:59", tz=tz_se)
+        _area_codes = {
+            "SE1": "10Y1001A1001A44P", "SE2": "10Y1001A1001A45N",
+            "SE3": "10Y1001A1001A46L", "SE4": "10Y1001A1001A47J"
+        }
+        new_rows_list = []
+        for a, bid_zone in _area_codes.items():
+            try:
+                prices = client.query_day_ahead_prices(bid_zone, start=_start_ts, end=_end_ts)
+                prices = prices.tz_convert(tz_se).tz_localize(None)
+                prices = prices[prices.index > spot_df_full['Tid'].max()]
+                for ts, eur_mwh in prices.items():
+                    fx   = fx_series.get(ts.date(), last_rate)
+                    kr   = round(eur_mwh * fx / 1000.0, 4)
+                    new_rows_list.append({'Tid': ts, 'area': a, 'kr_kwh': kr,
+                                          'ore_kwh': round(kr * 100, 2), 'EUR_SEK': fx})
+            except Exception:
+                pass
+        if not new_rows_list:
+            st.session_state['spot_live_fetch_error'] = f"ENTSO-E returned no rows for {fetch_from}–{fetch_to}"
+            return spot_df_full
+        _df = pd.DataFrame(new_rows_list)
+        pivot = _df.pivot_table(index='Tid', columns='area', values=['kr_kwh','ore_kwh'], aggfunc='first')
+        pivot.columns = [f"{a}_{m}" for m, a in pivot.columns]
+        pivot = pivot.reset_index()
+        pivot['EUR_SEK'] = pivot['Tid'].apply(lambda t: fx_series.get(t.date(), last_rate))
+        col_order = ['Tid','SE1_ore_kwh','SE1_kr_kwh','SE2_ore_kwh','SE2_kr_kwh',
+                     'SE3_ore_kwh','SE3_kr_kwh','SE4_ore_kwh','SE4_kr_kwh','EUR_SEK']
+        for c in col_order:
+            if c not in pivot.columns:
+                pivot[c] = float('nan')
+        new_rows = pivot[col_order]
+        extended = pd.concat([spot_df_full, new_rows], ignore_index=True).sort_values('Tid').reset_index(drop=True)
+        _add_spot_log(f"ENTSO-E: added {len(new_rows)} hours. Now covers up to {extended['Tid'].max().date()}.")
+        st.session_state['spot_live_extended_to'] = str(target)
+        st.session_state.pop('spot_live_fetch_error', None)
+        return extended
+    except Exception as e:
+        st.session_state['spot_live_fetch_error'] = f"ENTSO-E error: {e}"
+        return spot_df_full
+
+
+def _load_preinstalled_spotprices(area: str, start_date, end_date, force_reload: bool = False):
+    """Load spot price data + auto-extend with live data."""
+    full_cache_key = 'spot_full_extended'
+    if force_reload or full_cache_key not in st.session_state:
+        fname = 'spotpriser_2023_2026.csv'
+        possible_paths = [
+            fname,
+            '/mount/src/batterysimulation/' + fname,
+            '/mount/src/batterysimulation_dev/' + fname,
+        ]
+        try:
+            possible_paths.append(os.path.join(os.path.dirname(__file__), fname))
+        except Exception:
+            pass
+        spot_df_full = None
+        for path in possible_paths:
+            try:
+                if os.path.exists(path):
+                    spot_df_full = pd.read_csv(path, sep=',', decimal='.', parse_dates=['Tid'])
+                    _add_spot_log(f"Loaded spot prices from {path}")
+                    break
+            except Exception:
+                continue
+        if spot_df_full is None:
+            try:
+                spot_df_full = pd.read_csv(
+                    "https://raw.githubusercontent.com/eraimon/batterysimulation/main/spotpriser_2023_2026.csv",
+                    sep=',', decimal='.', parse_dates=['Tid']
+                )
+                _add_spot_log("Loaded spot prices from GitHub (fallback)")
+            except Exception as e:
+                _add_spot_log(f"Could not load spot prices: {e}")
+                return None
+        if spot_df_full is None:
+            return None
+        spot_df_full = _extend_spot_with_live_data(spot_df_full)
+        st.session_state[full_cache_key] = spot_df_full
+    else:
+        spot_df_full = st.session_state[full_cache_key]
+        extended = _extend_spot_with_live_data(spot_df_full)
+        if extended is not spot_df_full:
+            spot_df_full = extended
+            st.session_state[full_cache_key] = spot_df_full
+
+    price_col = f"{area}_kr_kwh"
+    if price_col not in spot_df_full.columns:
+        price_col_ore = f"{area}_ore_kwh"
+        if price_col_ore in spot_df_full.columns:
+            spot_df_full[price_col] = spot_df_full[price_col_ore] / 100
+        else:
+            return None
+    if 'EUR_SEK' in spot_df_full.columns:
+        st.session_state['spot_eur_sek_rate'] = spot_df_full['EUR_SEK'].mean()
+    st.session_state[f'spot_cache_{area}'] = spot_df_full
+    spot_df = spot_df_full[['Tid', price_col]].copy()
+    spot_df.columns = ['Tid', 'spotpris']
+    spot_df = spot_df[
+        (spot_df['Tid'].dt.date >= start_date) &
+        (spot_df['Tid'].dt.date <= end_date)
+    ]
+    return spot_df if not spot_df.empty else None
 
 # -------------------------------------------------
 # Authentication
@@ -356,13 +549,14 @@ if uploaded is not None:
     # DETAILED RESULTS IN TABS
     # ========================================
     
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "📈 Summary Report",
         "🔥 Hourly Profiles", 
         "📆 Monthly Data",
         "📊 Input DNI Data",
         "💾 Export",
-        "🌾 Grain Drying"
+        "🌾 Grain Drying",
+        "⚡ Spot Prices"
     ])
     
     # ========================================
@@ -1054,6 +1248,174 @@ MONTHLY PRODUCTION (kWh)
                 "Drying demand [kWh]": [monthly_demand_kwh_per] * len(selected_months),
             })
             st.bar_chart(chart_df.set_index("Month"), color=["#F4A300", "#2196F3"])
+
+    # ========================================
+    # TAB 7: SPOT PRICES
+    # ========================================
+
+    with tab7:
+        st.markdown("### ⚡ Electricity Spot Prices")
+        st.markdown(
+            "Load hourly Nord Pool spot prices for any Swedish price area. "
+            "Data is sourced from a pre-installed CSV (2023–2026) and automatically "
+            "extended with live data from ENTSO-E Transparency Platform."
+        )
+
+        # ── Area & date range ─────────────────────────────────────────
+        sp_c1, sp_c2, sp_c3 = st.columns(3)
+        with sp_c1:
+            sp_area = st.selectbox(
+                "Price area", ["SE1", "SE2", "SE3", "SE4"],
+                index=2, key="sp_area",
+                help="SE1=Luleå · SE2=Sundsvall · SE3=Stockholm · SE4=Malmö/Skåne"
+            )
+        with sp_c2:
+            sp_start = st.date_input(
+                "Start date", value=date(2024, 1, 1), key="sp_start"
+            )
+        with sp_c3:
+            sp_end = st.date_input(
+                "End date", value=date.today(), key="sp_end"
+            )
+
+        col_btn1, col_btn2, _ = st.columns([1, 1, 4])
+        with col_btn1:
+            load_btn = st.button("📥 Load spot prices", type="primary", key="sp_load_btn")
+        with col_btn2:
+            reload_btn = st.button("🔄 Force reload", key="sp_reload_btn")
+
+        if load_btn or reload_btn:
+            with st.spinner(f"Loading spot prices for {sp_area}…"):
+                sp_df = _load_preinstalled_spotprices(
+                    sp_area, sp_start, sp_end,
+                    force_reload=bool(reload_btn)
+                )
+            if sp_df is not None and not sp_df.empty:
+                st.session_state["sp_loaded_df"]   = sp_df
+                st.session_state["sp_loaded_area"] = sp_area
+                st.success(
+                    f"✅ Loaded **{len(sp_df):,}** hours for **{sp_area}** "
+                    f"({sp_df['Tid'].min().date()} → {sp_df['Tid'].max().date()})"
+                )
+            else:
+                st.error(
+                    "❌ Could not load spot prices. "
+                    "Make sure `spotpriser_2023_2026.csv` is in the app folder, "
+                    "or use the manual ENTSO-E fetch below."
+                )
+
+        # Live status banner
+        _spot_err  = st.session_state.get('spot_live_fetch_error')
+        _spot_last = st.session_state.get('spot_live_extended_to', '—')
+        if _spot_err:
+            st.warning(f"⚠️ Live fetch error: {_spot_err}  ·  Last successful: **{_spot_last}**")
+
+        # ── Manual ENTSO-E fetch ──────────────────────────────────────
+        with st.expander("🔧 Manual ENTSO-E fetch"):
+            st.markdown("Use this if the pre-installed CSV does not cover your period.")
+            me_c1, me_c2 = st.columns(2)
+            with me_c1:
+                me_start = st.date_input("Start", value=date(2024, 1, 1), key="me_start")
+                me_end   = st.date_input("End",   value=date.today(),     key="me_end")
+            with me_c2:
+                me_area  = st.selectbox("Area", ["SE1","SE2","SE3","SE4"], index=2, key="me_area")
+                me_key   = st.text_input("ENTSO-E API key (optional)", type="password", key="me_key")
+            if st.button("🌐 Fetch from ENTSO-E", key="me_fetch_btn"):
+                with st.spinner("Fetching…"):
+                    try:
+                        me_df = fetch_spotprices_entsoe(
+                            me_key or ENTSOE_API_KEY, me_area,
+                            str(me_start), str(me_end)
+                        )
+                        st.session_state["sp_loaded_df"]   = me_df
+                        st.session_state["sp_loaded_area"] = me_area
+                        st.success(f"✅ Fetched {len(me_df):,} hours for {me_area}")
+                    except Exception as _e:
+                        st.error(f"❌ {_e}")
+
+        # ── Display loaded data ───────────────────────────────────────
+        sp_df_show = st.session_state.get("sp_loaded_df")
+        loaded_area = st.session_state.get("sp_loaded_area", sp_area)
+
+        if sp_df_show is not None and not sp_df_show.empty:
+            eur_sek = st.session_state.get("spot_eur_sek_rate", 11.20)
+            show_eur = st.toggle("Show in EUR/kWh", value=False, key="sp_eur_toggle")
+            prices_disp = sp_df_show["spotpris"] / eur_sek if show_eur else sp_df_show["spotpris"]
+            currency = "EUR/kWh" if show_eur else "kr/kWh"
+
+            # KPI row
+            kc1, kc2, kc3, kc4 = st.columns(4)
+            kc1.metric("Min",    f"{prices_disp.min():.3f} {currency}")
+            kc2.metric("Max",    f"{prices_disp.max():.3f} {currency}")
+            kc3.metric("Mean",   f"{prices_disp.mean():.3f} {currency}")
+            kc4.metric("EUR/SEK", f"{eur_sek:.2f}")
+
+            # Daily price gap chart
+            st.markdown("#### Daily price gap (max − min)")
+            _pg = sp_df_show.copy()
+            _pg["_dp"]  = prices_disp.values
+            _pg["Day"]  = _pg["Tid"].dt.date
+            _ds = _pg.groupby("Day")["_dp"].agg(["min","max"])
+            _ds["gap"] = _ds["max"] - _ds["min"]
+            st.line_chart(_ds["gap"].rename(f"Price gap [{currency}]"))
+            st.caption(
+                f"Average daily price gap: **{_ds['gap'].mean():.3f} {currency}**  ·  "
+                f"Max gap: **{_ds['gap'].max():.3f} {currency}** on {_ds['gap'].idxmax()}"
+            )
+
+            # Monthly average bar chart
+            st.markdown("#### Monthly average spot price")
+            _mo = sp_df_show.copy()
+            _mo["_dp"]    = prices_disp.values
+            _mo["Period"] = _mo["Tid"].dt.to_period("M").astype(str)
+            _ma = _mo.groupby("Period")["_dp"].agg(["mean","min","max"]).reset_index()
+            st.bar_chart(_ma.set_index("Period")["mean"].rename(f"Mean [{currency}]"))
+
+            with st.expander("📋 Monthly data table"):
+                _ma_disp = _ma.copy()
+                _ma_disp.columns = ["Period", f"Mean {currency}", f"Min {currency}", f"Max {currency}"]
+                st.dataframe(_ma_disp, use_container_width=True, hide_index=True)
+
+            # Integration hint for Grain Drying tab
+            if st.button("💾 Use these prices in Grain Drying tab", key="sp_use_btn"):
+                st.session_state["drying_spot_df"]   = sp_df_show.copy()
+                st.session_state["drying_spot_area"] = loaded_area
+                st.success(
+                    f"✅ Spot prices stored — switch to the **🌾 Grain Drying** tab. "
+                    f"The electricity backup cost comparison will use these prices."
+                )
+
+            # Download
+            st.download_button(
+                "📥 Download as CSV",
+                data=sp_df_show.to_csv(index=False).encode("utf-8"),
+                file_name=f"spot_{loaded_area}_{sp_df_show['Tid'].min().date()}_{sp_df_show['Tid'].max().date()}.csv",
+                mime="text/csv",
+                key="sp_download_btn"
+            )
+
+            # Log
+            with st.expander("📋 Load log"):
+                logs = st.session_state.get("spot_log", [])
+                for lg in reversed(logs[-20:]):
+                    st.caption(lg)
+        else:
+            st.info("Press **Load spot prices** to fetch data for the selected area and period.")
+
+            # Show data coverage note
+            st.markdown("""
+            **Pre-installed data coverage:** January 2023 – January 2026  
+            **Live extension:** today/tomorrow via ENTSO-E (auto-updated each session)
+
+            | Area | Region |
+            |------|--------|
+            | SE1 | Luleå / Northern Sweden |
+            | SE2 | Sundsvall / Mid-North Sweden |
+            | SE3 | Stockholm / Central Sweden |
+            | SE4 | Malmö / Skåne / Southern Sweden |
+
+            > 💡 For the Skåne grain drying use case, select **SE4**.
+            """)
 
     st.markdown("---")
     st.markdown("*Helixis Solar Concentrator Calculator - Results generated: " + 
