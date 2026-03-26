@@ -1487,14 +1487,6 @@ MONTHLY PRODUCTION (kWh)
         aperture_area   = n_units * APERTURE_24
         gcr_pct         = aperture_area / gross_footprint * 100 if gross_footprint > 0 else 0
 
-        # Energy output — based on uploaded DNI file, scaled to this layout
-        peak_kw_field  = aperture_area * (DESIGN_DNI_W_M2 / 1000.0) * eta_opt
-        annual_kwh_field = annual_system_kwh * (aperture_area / max(mirror_area, 1)) \
-                           if mirror_area > 0 else 0.0
-
-        # CO2 offset (biomass reference: 120 kg CO2/MWh)
-        co2_offset_t = annual_kwh_field / 1000.0 * 120 / 1000.0
-
         with fl_col2:
             # ── SVG field diagram via components.html ─────────────────
             st.markdown("#### 🗺️ Array footprint diagram")
@@ -1607,7 +1599,7 @@ MONTHLY PRODUCTION (kWh)
 
             _components.html(html_content, height=SVG_H + 10, scrolling=False)
 
-        # ── KPI metrics ───────────────────────────────────────────────
+        # ── KPI metrics — physical dimensions only ───────────────────
         st.markdown("---")
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Total field area",
@@ -1616,25 +1608,12 @@ MONTHLY PRODUCTION (kWh)
         m2.metric("Total aperture area",
                   f"{aperture_area:.1f} m²",
                   delta=f"GCR: {gcr_pct:.0f}% of ground area")
-        m3.metric("Peak thermal output",
-                  f"{peak_kw_field:,.0f} kW",
-                  delta=f"at 1,000 W/m² DNI, η = {eta_opt_pct}%")
-        annual_label = f"{annual_kwh_field/1000:,.1f} MWh/yr" if annual_kwh_field >= 1000 \
-                       else f"{annual_kwh_field:,.0f} kWh/yr"
-        m4.metric("Annual yield (from file)",
-                  annual_label,
-                  delta=f"{annual_kwh_field/1e6:.3f} GWh/yr")
-
-        m5, m6, m7 = st.columns(3)
-        m5.metric("CO₂ offset (biomass ref.)",
-                  f"{co2_offset_t:.1f} t/yr",
-                  delta="@ 120 kg CO₂/MWh")
-        m6.metric("Pillar foundations",
+        m3.metric("Pillar foundations",
                   f"{n_units} × 1 m²",
                   delta=f"{n_units} m² total foundation area")
-        m7.metric("Array layout",
+        m4.metric("Array layout",
                   f"{n_strings} strings × {n_per_string}",
-                  delta="Unlimited parallel expansion")
+                  delta=f"Row pitch {row_pitch:.1f} m · Col pitch {col_pitch:.1f} m")
 
         # ── Detailed spacing table ────────────────────────────────────
         st.markdown("---")
