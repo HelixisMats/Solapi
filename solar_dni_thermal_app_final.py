@@ -5,6 +5,8 @@ import numpy as np
 import math
 from report_generator import generate_report
 
+st.set_page_config(layout="wide")
+
 # -------------------------------------------------
 # Authentication
 # -------------------------------------------------
