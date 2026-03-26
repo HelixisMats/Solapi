@@ -1055,26 +1055,37 @@ MONTHLY PRODUCTION (kWh)
                     cop        = st.number_input("COP", 1.0, 8.0, 3.5, 0.1, key="dry_hp_cop")
                     hp_cap_kw  = st.number_input("Thermal capacity [kW]", 10.0, 2000.0, 200.0, 10.0, key="dry_hp_cap")
                     hp_op_h    = st.slider("Operating hours/day", 1, 24, 16, key="dry_hp_h")
-                    hp_price   = st.number_input("Electricity price [€/kWh]", 0.01, 1.0, 0.10, 0.01, key="dry_hp_price")
                     hp_w_pct   = st.slider("→ Water tank [%]", 0, 100, 80, key="hp_w_pct")
                     hp_o_pct   = 100 - hp_w_pct
                     st.caption(f"→ Oil tank: {hp_o_pct} %")
-                    hp_day_kwh = hp_cap_kw * hp_op_h   # max heat per day
+                    hp_day_kwh = hp_cap_kw * hp_op_h
                 else:
-                    cop = hp_cap_kw = hp_op_h = hp_price = hp_day_kwh = 0.0
+                    cop = hp_cap_kw = hp_op_h = hp_day_kwh = 0.0
                     hp_w_pct = hp_o_pct = 0
 
             with col_src3:
                 st.markdown("**⚡ Electric heater**")
                 use_el = st.checkbox("Enable", value=True, key="dry_use_el")
                 if use_el:
-                    el_cap_kw  = st.number_input("Thermal capacity [kW]", 10.0, 2000.0, 100.0, 10.0, key="dry_el_cap")
-                    el_op_h    = st.slider("Max operating hours/day", 1, 24, 8, key="dry_el_h")
+                    el_cap_kw = st.number_input("Thermal capacity [kW]", 10.0, 2000.0, 100.0, 10.0, key="dry_el_cap")
+                    el_op_h   = st.slider("Max operating hours/day", 1, 24, 8, key="dry_el_h")
 
-                    # ── Spot price threshold ──
-                    _spot_loaded = st.session_state.get("drying_spot_df") is not None
+                    # ── Spot price detection: accept any loaded source ──
+                    _spot_src = (
+                        st.session_state.get("drying_spot_df") or
+                        st.session_state.get("sp_loaded_df") or
+                        (lambda df: df[["Tid", next(c for c in df.columns if c.endswith("_kr_kwh"))]]
+                            .rename(columns={next(c for c in df.columns if c.endswith("_kr_kwh")): "spotpris"})
+                            if df is not None and any(c.endswith("_kr_kwh") for c in df.columns) else None
+                        )(st.session_state.get("spot_full_extended"))
+                    )
+                    _spot_loaded = _spot_src is not None and not _spot_src.empty if hasattr(_spot_src, "empty") else False
+
                     if _spot_loaded:
-                        st.caption("✅ Spot prices loaded from ⚡ Spot Prices tab")
+                        # Store for simulation use
+                        st.session_state["drying_spot_df"] = _spot_src
+                        _avg_ore = float(_spot_src["spotpris"].mean() * 100)
+                        st.caption(f"✅ Spot prices loaded — avg {_avg_ore:.0f} öre/kWh")
                         el_threshold_ore = st.slider(
                             "Run when spot price below [öre/kWh]",
                             min_value=10, max_value=300, value=100, step=5,
@@ -1082,14 +1093,9 @@ MONTHLY PRODUCTION (kWh)
                             help="Electric heater only runs on days where the average spot price is below this threshold."
                         )
                     else:
-                        st.caption("⚠️ No spot prices loaded — using fixed price fallback")
-                        el_threshold_ore = 999  # always run if no spot data
-                        el_price_fallback = st.number_input(
-                            "Electricity spot price [€/kWh]", 0.01, 1.0, 0.12, 0.01,
-                            key="dry_el_price"
-                        )
+                        st.caption("⚠️ No spot prices loaded — load in ⚡ Spot Prices tab")
+                        el_threshold_ore = 999  # always run
 
-                    # ── Electricity cost components ──
                     el_energy_tax_ore = st.number_input(
                         "Energy tax [öre/kWh]", 0.0, 100.0, 43.9, 0.1,
                         key="dry_el_tax",
@@ -1100,11 +1106,10 @@ MONTHLY PRODUCTION (kWh)
                         key="dry_el_transfer",
                         help="Överföringskostnad — typical 20–50 öre/kWh"
                     )
-
-                    el_w_pct   = st.slider("→ Water tank [%]", 0, 100, 40, key="el_w_pct")
-                    el_o_pct   = 100 - el_w_pct
+                    el_w_pct = st.slider("→ Water tank [%]", 0, 100, 40, key="el_w_pct")
+                    el_o_pct = 100 - el_w_pct
                     st.caption(f"→ Oil tank: {el_o_pct} %")
-                    el_day_kwh_max = el_cap_kw * el_op_h   # maximum if heater runs
+                    el_day_kwh_max = el_cap_kw * el_op_h
                 else:
                     el_cap_kw = el_op_h = el_day_kwh_max = 0.0
                     el_threshold_ore = 0
@@ -1262,7 +1267,10 @@ MONTHLY PRODUCTION (kWh)
             ref_cost = total_drying_kwh * pellets_price
 
             hp_el_kwh = total_hp_used / cop if (use_hp and cop > 0) else 0.0
-            hp_cost   = hp_el_kwh * (hp_price if use_hp else 0)
+            # HP electricity price: use spot average if available, else energy tax + transfer only
+            _hp_spot_src = st.session_state.get("drying_spot_df")
+            hp_spot_eur = float(_hp_spot_src["spotpris"].mean()) if _hp_spot_src is not None else 0.10
+            hp_cost = hp_el_kwh * hp_spot_eur
 
             # Electric heater cost: weighted actual spot + fixed tax + transfer
             if use_el and total_el_used > 0:
