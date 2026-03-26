@@ -684,13 +684,13 @@ MONTHLY PRODUCTION (kWh)
         with col_p1:
             start_month = st.selectbox(
                 "Start month", MONTH_ORDER,
-                index=MONTH_ORDER.index("Jul"),
+                index=MONTH_ORDER.index("Aug"),
                 key="dry_start"
             )
         with col_p2:
             end_month = st.selectbox(
                 "End month", MONTH_ORDER,
-                index=MONTH_ORDER.index("Aug"),
+                index=MONTH_ORDER.index("Sep"),
                 key="dry_end"
             )
 
@@ -714,10 +714,14 @@ MONTHLY PRODUCTION (kWh)
 
             # ── Drying demand ────────────────────────────────────
             st.markdown("#### ⚡ Drying Energy Demand")
+            st.caption(
+                "Reference: a farm drying 10 000 tonnes/season typically requires ~1 MW "
+                "thermal over 6 weeks (Aug–Sep), consuming ~1 000 MWh of heat energy."
+            )
             col_d1, col_d2, col_d3 = st.columns(3)
             with col_d1:
                 grain_tonnes = st.number_input(
-                    "Grain to dry [tonnes]", min_value=0.1, value=500.0, step=50.0,
+                    "Grain to dry [tonnes]", min_value=0.1, value=10000.0, step=500.0,
                     key="dry_tonnes"
                 )
             with col_d2:
@@ -735,24 +739,63 @@ MONTHLY PRODUCTION (kWh)
             mc_in_f  = mc_in  / 100.0
             mc_out_f = mc_out / 100.0
             water_to_remove_kg = grain_tonnes * 1000.0 * (mc_in_f - mc_out_f) / (1.0 - mc_out_f)
-            # Specific energy for hot-air grain drying ≈ 1 000 kWh/ton water (practical value)
+            # Specific energy for hot-air grain drying ≈ 1 430 kWh/ton water gives ~1 000 MWh for 10 000 t
             specific_energy_kwh_t = st.slider(
                 "Specific drying energy [kWh / tonne of water removed]",
-                min_value=600, max_value=2000, value=1000, step=50,
+                min_value=600, max_value=2000, value=1430, step=50,
                 key="dry_specific",
-                help="Typically 800–1 200 kWh/tonne of water. Lower = more efficient dryer."
+                help="Typically 800–1 500 kWh/tonne of water removed. Default calibrated to ~1 000 MWh for 10 000 t at 20→14 % MC."
             )
             total_drying_kwh = (water_to_remove_kg / 1000.0) * specific_energy_kwh_t
+            # Peak thermal power assuming uniform load over 6 weeks (42 days × 18 h/day)
+            peak_drying_kw = total_drying_kwh / (period_days * 18) if period_days > 0 else 0
 
-            col_r1, col_r2, col_r3 = st.columns(3)
+            col_r1, col_r2, col_r3, col_r4 = st.columns(4)
             with col_r1:
                 st.metric("Water to remove", f"{water_to_remove_kg/1000:.1f} tonnes")
             with col_r2:
-                st.metric("Total drying demand", f"{total_drying_kwh:,.0f} kWh")
+                st.metric("Total drying demand", f"{total_drying_kwh/1000:,.1f} MWh")
             with col_r3:
+                st.metric("Avg. peak thermal load", f"{peak_drying_kw:,.0f} kW")
+            with col_r4:
                 solar_coverage_pct = min(period_solar_kwh / total_drying_kwh * 100, 100) \
                     if total_drying_kwh > 0 else 0
                 st.metric("Solar heat covers", f"{solar_coverage_pct:.1f} %")
+
+            # ── LC24 HW unit sizing ──────────────────────────────
+            st.markdown("#### 🔆 LC24 HW Unit Sizing")
+            # Energy-based: how many LC24 units to cover the full drying demand
+            kwh_per_lc24 = float(monthly_system_kwh[selected_months].sum() / max(mirror_area, 1)) * APERTURE_24 \
+                if mirror_area > 0 else 0
+            lc24_for_energy = math.ceil(total_drying_kwh / kwh_per_lc24) if kwh_per_lc24 > 0 else 0
+            # Peak-power-based: units to deliver the average peak thermal load
+            lc24_for_peak = math.ceil(peak_drying_kw / (APERTURE_24 * peak_kw_per_m2)) \
+                if peak_kw_per_m2 > 0 else 0
+
+            col_lc1, col_lc2, col_lc3 = st.columns(3)
+            with col_lc1:
+                st.metric(
+                    "LC24 units – full energy cover",
+                    f"{lc24_for_energy} units",
+                    help="Number of LC24 HW units whose seasonal output equals the total drying demand."
+                )
+            with col_lc2:
+                st.metric(
+                    "LC24 units – peak power cover",
+                    f"{lc24_for_peak} units",
+                    help="Number of LC24 HW units to deliver the average thermal peak load during daylight hours."
+                )
+            with col_lc3:
+                lc24_mirror_total = lc24_for_peak * APERTURE_24
+                st.metric(
+                    "Total mirror area (peak)",
+                    f"{lc24_mirror_total:,.0f} m²"
+                )
+            st.info(
+                f"💡 **Recommendation:** {lc24_for_peak} × LC24 HW units cover the ~{peak_drying_kw:,.0f} kW "
+                f"thermal peak load. Combined with thermal storage and a backup heater/heat pump, "
+                f"this can reliably supply the full {total_drying_kwh/1000:,.0f} MWh seasonal demand."
+            )
 
             # ── Thermal storage ──────────────────────────────────
             st.markdown("#### 🔋 Thermal Storage")
