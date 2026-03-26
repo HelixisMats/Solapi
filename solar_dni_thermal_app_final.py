@@ -139,68 +139,23 @@ def _extend_spot_with_live_data(spot_df_full: pd.DataFrame) -> pd.DataFrame:
 
 
 def _load_preinstalled_spotprices(area: str, start_date, end_date, force_reload: bool = False):
-    """Load spot price data + auto-extend with live data."""
+    """Load spot price data from session cache, then filter to area/dates."""
     full_cache_key = 'spot_full_extended'
-    if force_reload or full_cache_key not in st.session_state:
-        fname = 'spotpriser_2023_2026.csv'
-        GITHUB_URL = "https://raw.githubusercontent.com/eraimon/batterysimulation/main/spotpriser_2023_2026.csv"
-        possible_paths = [
-            fname,
-            '/mount/src/batterysimulation/' + fname,
-            '/mount/src/batterysimulation_dev/' + fname,
-        ]
-        try:
-            possible_paths.append(os.path.join(os.path.dirname(__file__), fname))
-        except Exception:
-            pass
+    if force_reload:
+        st.session_state.pop(full_cache_key, None)
 
-        spot_df_full = None
+    spot_df_full = st.session_state.get(full_cache_key)
+    if spot_df_full is None:
+        # No data in cache — nothing to return; user must upload or fetch via ENTSO-E
+        st.session_state['spot_load_error'] = (
+            "No spot price data loaded yet. "
+            "Upload the `spotpriser_2023_2026.csv` file or fetch directly from ENTSO-E below."
+        )
+        return None
 
-        # Try local paths first
-        for path in possible_paths:
-            try:
-                if os.path.exists(path):
-                    spot_df_full = pd.read_csv(path, sep=',', decimal='.', parse_dates=['Tid'])
-                    _add_spot_log(f"Loaded spot prices from {path}")
-                    break
-            except Exception:
-                continue
-
-        # Always try GitHub — it is the canonical source
-        if spot_df_full is None:
-            _add_spot_log(f"Local file not found — fetching from GitHub...")
-            try:
-                resp = requests.get(GITHUB_URL, timeout=30)
-                resp.raise_for_status()
-                spot_df_full = pd.read_csv(
-                    io.StringIO(resp.text), sep=',', decimal='.', parse_dates=['Tid']
-                )
-                _add_spot_log(f"Loaded {len(spot_df_full):,} rows from GitHub")
-                # Cache locally for next run
-                try:
-                    spot_df_full.to_csv(fname, index=False)
-                    _add_spot_log(f"Cached to {fname}")
-                except Exception:
-                    pass
-            except Exception as e:
-                _add_spot_log(f"GitHub fetch failed: {e}")
-                st.session_state['spot_load_error'] = (
-                    f"Could not load spot prices from GitHub: {e}  \n"
-                    f"URL tried: `{GITHUB_URL}`"
-                )
-                return None
-
-        if spot_df_full is None:
-            return None
-        st.session_state.pop('spot_load_error', None)
-        spot_df_full = _extend_spot_with_live_data(spot_df_full)
-        st.session_state[full_cache_key] = spot_df_full
-    else:
-        spot_df_full = st.session_state[full_cache_key]
-        extended = _extend_spot_with_live_data(spot_df_full)
-        if extended is not spot_df_full:
-            spot_df_full = extended
-            st.session_state[full_cache_key] = spot_df_full
+    st.session_state.pop('spot_load_error', None)
+    spot_df_full = _extend_spot_with_live_data(spot_df_full)
+    st.session_state[full_cache_key] = spot_df_full
 
     price_col = f"{area}_kr_kwh"
     if price_col not in spot_df_full.columns:
@@ -211,8 +166,19 @@ def _load_preinstalled_spotprices(area: str, start_date, end_date, force_reload:
             return None
     if 'EUR_SEK' in spot_df_full.columns:
         st.session_state['spot_eur_sek_rate'] = spot_df_full['EUR_SEK'].mean()
-    st.session_state[f'spot_cache_{area}'] = spot_df_full
     spot_df = spot_df_full[['Tid', price_col]].copy()
+    spot_df.columns = ['Tid', 'spotpris']
+    spot_df = spot_df[
+        (spot_df['Tid'].dt.date >= start_date) &
+        (spot_df['Tid'].dt.date <= end_date)
+    ]
+    return spot_df if not spot_df.empty else None
+
+
+def _ingest_spot_csv(uploaded_file) -> pd.DataFrame:
+    """Parse an uploaded spot price CSV (same format as spotpriser_2023_2026.csv)."""
+    df = pd.read_csv(uploaded_file, sep=',', decimal='.', parse_dates=['Tid'])
+    return df
     spot_df.columns = ['Tid', 'spotpris']
     spot_df = spot_df[
         (spot_df['Tid'].dt.date >= start_date) &
@@ -569,14 +535,15 @@ if uploaded is not None:
     # DETAILED RESULTS IN TABS
     # ========================================
     
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "📈 Summary Report",
         "🔥 Hourly Profiles", 
         "📆 Monthly Data",
         "📊 Input DNI Data",
         "💾 Export",
         "🌾 Grain Drying",
-        "⚡ Spot Prices"
+        "⚡ Spot Prices",
+        "📐 Field Layout"
     ])
     
     # ========================================
@@ -1269,6 +1236,7 @@ MONTHLY PRODUCTION (kWh)
             })
             st.bar_chart(chart_df.set_index("Month"), color=["#F4A300", "#2196F3"])
 
+
     # ========================================
     # TAB 7: SPOT PRICES
     # ========================================
@@ -1276,112 +1244,132 @@ MONTHLY PRODUCTION (kWh)
     with tab7:
         st.markdown("### ⚡ Electricity Spot Prices")
         st.markdown(
-            "Load hourly Nord Pool spot prices for any Swedish price area. "
-            "Data is sourced from a pre-installed CSV (2023–2026) and automatically "
-            "extended with live data from ENTSO-E Transparency Platform."
+            "Load Nord Pool spot prices by uploading the CSV from the battery simulation app, "
+            "or fetch any period directly from ENTSO-E. The two apps remain fully independent."
         )
 
-        # ── Area & date range ─────────────────────────────────────────
-        sp_c1, sp_c2, sp_c3 = st.columns(3)
-        with sp_c1:
-            sp_area = st.selectbox(
-                "Price area", ["SE1", "SE2", "SE3", "SE4"],
-                index=2, key="sp_area",
-                help="SE1=Luleå · SE2=Sundsvall · SE3=Stockholm · SE4=Malmö/Skåne"
+        # ── Step 1: Get data into session cache ───────────────────────
+        st.markdown("#### 1️⃣ Load spot price data")
+        src_col1, src_col2 = st.columns(2)
+
+        with src_col1:
+            st.markdown("**📂 Upload CSV file**")
+            st.caption("Upload `spotpriser_2023_2026.csv` exported from the battery simulation app.")
+            uploaded_spot = st.file_uploader(
+                "spotpriser_2023_2026.csv", type=["csv"],
+                key="sp_csv_upload", label_visibility="collapsed"
             )
-        with sp_c2:
-            sp_start = st.date_input(
-                "Start date", value=date(2024, 1, 1), key="sp_start"
-            )
-        with sp_c3:
-            sp_end = st.date_input(
-                "End date", value=date.today(), key="sp_end"
-            )
+            if uploaded_spot is not None:
+                try:
+                    raw_df = _ingest_spot_csv(uploaded_spot)
+                    st.session_state['spot_full_extended'] = raw_df
+                    st.session_state.pop('spot_live_extended_to', None)
+                    _add_spot_log(f"Uploaded CSV: {len(raw_df):,} rows, {raw_df['Tid'].min().date()} → {raw_df['Tid'].max().date()}")
+                    st.success(
+                        f"✅ CSV loaded — **{len(raw_df):,} rows** "
+                        f"({raw_df['Tid'].min().date()} → {raw_df['Tid'].max().date()})"
+                    )
+                except Exception as e:
+                    st.error(f"❌ Could not read file: {e}")
 
-        col_btn1, col_btn2, _ = st.columns([1, 1, 4])
-        with col_btn1:
-            load_btn = st.button("📥 Load spot prices", type="primary", key="sp_load_btn")
-        with col_btn2:
-            reload_btn = st.button("🔄 Force reload", key="sp_reload_btn")
-
-        if load_btn or reload_btn:
-            with st.spinner(f"Loading spot prices for {sp_area}…"):
-                sp_df = _load_preinstalled_spotprices(
-                    sp_area, sp_start, sp_end,
-                    force_reload=bool(reload_btn)
-                )
-            if sp_df is not None and not sp_df.empty:
-                st.session_state["sp_loaded_df"]   = sp_df
-                st.session_state["sp_loaded_area"] = sp_area
-                st.success(
-                    f"✅ Loaded **{len(sp_df):,}** hours for **{sp_area}** "
-                    f"({sp_df['Tid'].min().date()} → {sp_df['Tid'].max().date()})"
-                )
-            else:
-                _load_err = st.session_state.get('spot_load_error', '')
-                st.error(
-                    "❌ Could not load spot prices.  \n"
-                    + (_load_err if _load_err else
-                       "Make sure `spotpriser_2023_2026.csv` is in the app folder "
-                       "or that the GitHub repo `eraimon/batterysimulation` is publicly accessible.")
-                )
-                st.info(
-                    "💡 **Alternative:** Use the **Manual ENTSO-E fetch** expander below "
-                    "to download spot prices directly from ENTSO-E Transparency Platform."
-                )
-
-        # Live status banner
-        _spot_err  = st.session_state.get('spot_live_fetch_error')
-        _spot_last = st.session_state.get('spot_live_extended_to', '—')
-        if _spot_err:
-            st.warning(f"⚠️ Live fetch error: {_spot_err}  ·  Last successful: **{_spot_last}**")
-
-        # ── Manual ENTSO-E fetch ──────────────────────────────────────
-        with st.expander("🔧 Manual ENTSO-E fetch"):
-            st.markdown("Use this if the pre-installed CSV does not cover your period.")
+        with src_col2:
+            st.markdown("**🌐 Fetch directly from ENTSO-E**")
+            st.caption("Downloads hourly day-ahead prices for any period. No CSV file needed.")
             me_c1, me_c2 = st.columns(2)
-            with me_c1:
-                me_start = st.date_input("Start", value=date(2024, 1, 1), key="me_start")
-                me_end   = st.date_input("End",   value=date.today(),     key="me_end")
-            with me_c2:
-                me_area  = st.selectbox("Area", ["SE1","SE2","SE3","SE4"], index=2, key="me_area")
-                me_key   = st.text_input("ENTSO-E API key (optional)", type="password", key="me_key")
-            if st.button("🌐 Fetch from ENTSO-E", key="me_fetch_btn"):
-                with st.spinner("Fetching…"):
+            me_area  = me_c1.selectbox("Area", ["SE1","SE2","SE3","SE4"], index=3, key="me_area",
+                                        help="SE4 = Skåne / Southern Sweden")
+            me_start = me_c1.date_input("Start", value=date(2024, 1, 1), key="me_start")
+            me_end   = me_c2.date_input("End",   value=date.today(),     key="me_end")
+            me_key   = me_c2.text_input("API key (optional)", type="password", key="me_key",
+                                         help="Leave blank to use the built-in key")
+            if st.button("🌐 Fetch from ENTSO-E", key="me_fetch_btn", use_container_width=True):
+                with st.spinner(f"Fetching {me_area} {me_start}→{me_end} from ENTSO-E…"):
                     try:
                         me_df = fetch_spotprices_entsoe(
                             me_key or ENTSOE_API_KEY, me_area,
                             str(me_start), str(me_end)
                         )
-                        st.session_state["sp_loaded_df"]   = me_df
-                        st.session_state["sp_loaded_area"] = me_area
-                        st.success(f"✅ Fetched {len(me_df):,} hours for {me_area}")
+                        raw_frame = me_df.rename(columns={"spotpris": f"{me_area}_kr_kwh"})
+                        raw_frame[f"{me_area}_ore_kwh"] = raw_frame[f"{me_area}_kr_kwh"] * 100
+                        st.session_state['spot_full_extended'] = raw_frame
+                        st.session_state['spot_entsoe_area']   = me_area
+                        st.session_state.pop('spot_live_extended_to', None)
+                        _add_spot_log(f"ENTSO-E: fetched {len(me_df):,} hours for {me_area}")
+                        st.success(f"✅ Fetched **{len(me_df):,}** hours for **{me_area}**")
                     except Exception as _e:
                         st.error(f"❌ {_e}")
 
-        # ── Display loaded data ───────────────────────────────────────
-        sp_df_show = st.session_state.get("sp_loaded_df")
+        # Cache status
+        _cached = st.session_state.get('spot_full_extended')
+        if _cached is not None:
+            st.info(
+                f"💾 **Data in memory:** {len(_cached):,} rows · "
+                f"{_cached['Tid'].min().date()} → {_cached['Tid'].max().date()} · "
+                f"{len([c for c in _cached.columns if 'kr_kwh' in c])} area(s)"
+            )
+
+        st.markdown("---")
+
+        # ── Step 2: Select area & date range, view data ───────────────
+        st.markdown("#### 2️⃣ Select area & period to display")
+        sp_c1, sp_c2, sp_c3, sp_c4 = st.columns(4)
+        with sp_c1:
+            sp_area = st.selectbox(
+                "Price area", ["SE1", "SE2", "SE3", "SE4"], index=3, key="sp_area",
+                help="SE4 = Malmö/Skåne"
+            )
+        with sp_c2:
+            sp_start = st.date_input("Start date", value=date(2024, 7, 1), key="sp_start")
+        with sp_c3:
+            sp_end = st.date_input("End date", value=date(2024, 9, 30), key="sp_end")
+        with sp_c4:
+            st.markdown(" ")
+            load_btn   = st.button("📊 Show prices", type="primary", key="sp_load_btn", use_container_width=True)
+            reload_btn = st.button("🔄 Re-extend live", key="sp_reload_btn", use_container_width=True)
+
+        if load_btn or reload_btn:
+            with st.spinner(f"Preparing {sp_area} data…"):
+                sp_df = _load_preinstalled_spotprices(
+                    sp_area, sp_start, sp_end, force_reload=bool(reload_btn)
+                )
+            if sp_df is not None and not sp_df.empty:
+                st.session_state["sp_loaded_df"]   = sp_df
+                st.session_state["sp_loaded_area"] = sp_area
+            else:
+                err = st.session_state.get('spot_load_error', 'No data found for selected area/period.')
+                st.warning(f"⚠️ {err}")
+
+        # Live-fetch status
+        _spot_err  = st.session_state.get('spot_live_fetch_error')
+        _spot_last = st.session_state.get('spot_live_extended_to', '—')
+        if _spot_err:
+            st.warning(f"⚠️ Live-extension error: {_spot_err}  ·  Last successful: **{_spot_last}**")
+        elif _spot_last != '—':
+            st.caption(f"Live data extended to: **{_spot_last}**")
+
+        # ── Step 3: Display ───────────────────────────────────────────
+        sp_df_show  = st.session_state.get("sp_loaded_df")
         loaded_area = st.session_state.get("sp_loaded_area", sp_area)
 
         if sp_df_show is not None and not sp_df_show.empty:
-            eur_sek = st.session_state.get("spot_eur_sek_rate", 11.20)
-            show_eur = st.toggle("Show in EUR/kWh", value=False, key="sp_eur_toggle")
+            st.markdown("---")
+            st.markdown("#### 📊 Results")
+            eur_sek     = st.session_state.get("spot_eur_sek_rate", 11.20)
+            show_eur    = st.toggle("Show in EUR/kWh", value=False, key="sp_eur_toggle")
             prices_disp = sp_df_show["spotpris"] / eur_sek if show_eur else sp_df_show["spotpris"]
-            currency = "EUR/kWh" if show_eur else "kr/kWh"
+            currency    = "EUR/kWh" if show_eur else "kr/kWh"
 
-            # KPI row
             kc1, kc2, kc3, kc4 = st.columns(4)
-            kc1.metric("Min",    f"{prices_disp.min():.3f} {currency}")
-            kc2.metric("Max",    f"{prices_disp.max():.3f} {currency}")
-            kc3.metric("Mean",   f"{prices_disp.mean():.3f} {currency}")
+            kc1.metric("Min",     f"{prices_disp.min():.3f} {currency}")
+            kc2.metric("Max",     f"{prices_disp.max():.3f} {currency}")
+            kc3.metric("Mean",    f"{prices_disp.mean():.3f} {currency}")
             kc4.metric("EUR/SEK", f"{eur_sek:.2f}")
 
-            # Daily price gap chart
-            st.markdown("#### Daily price gap (max − min)")
-            _pg = sp_df_show.copy()
-            _pg["_dp"]  = prices_disp.values
-            _pg["Day"]  = _pg["Tid"].dt.date
-            _ds = _pg.groupby("Day")["_dp"].agg(["min","max"])
+            st.markdown("##### Daily price gap (max − min per day)")
+            _pg  = sp_df_show.copy()
+            _pg["_dp"] = prices_disp.values
+            _pg["Day"] = _pg["Tid"].dt.date
+            _ds  = _pg.groupby("Day")["_dp"].agg(["min","max"])
             _ds["gap"] = _ds["max"] - _ds["min"]
             st.line_chart(_ds["gap"].rename(f"Price gap [{currency}]"))
             st.caption(
@@ -1389,59 +1377,286 @@ MONTHLY PRODUCTION (kWh)
                 f"Max gap: **{_ds['gap'].max():.3f} {currency}** on {_ds['gap'].idxmax()}"
             )
 
-            # Monthly average bar chart
-            st.markdown("#### Monthly average spot price")
-            _mo = sp_df_show.copy()
+            st.markdown("##### Monthly average spot price")
+            _mo           = sp_df_show.copy()
             _mo["_dp"]    = prices_disp.values
             _mo["Period"] = _mo["Tid"].dt.to_period("M").astype(str)
-            _ma = _mo.groupby("Period")["_dp"].agg(["mean","min","max"]).reset_index()
+            _ma           = _mo.groupby("Period")["_dp"].agg(["mean","min","max"]).reset_index()
             st.bar_chart(_ma.set_index("Period")["mean"].rename(f"Mean [{currency}]"))
 
             with st.expander("📋 Monthly data table"):
-                _ma_disp = _ma.copy()
-                _ma_disp.columns = ["Period", f"Mean {currency}", f"Min {currency}", f"Max {currency}"]
-                st.dataframe(_ma_disp, use_container_width=True, hide_index=True)
+                _ma.columns = ["Period", f"Mean {currency}", f"Min {currency}", f"Max {currency}"]
+                st.dataframe(_ma, use_container_width=True, hide_index=True)
 
-            # Integration hint for Grain Drying tab
             if st.button("💾 Use these prices in Grain Drying tab", key="sp_use_btn"):
                 st.session_state["drying_spot_df"]   = sp_df_show.copy()
                 st.session_state["drying_spot_area"] = loaded_area
-                st.success(
-                    f"✅ Spot prices stored — switch to the **🌾 Grain Drying** tab. "
-                    f"The electricity backup cost comparison will use these prices."
-                )
+                st.success(f"✅ Stored for **{loaded_area}** — switch to **🌾 Grain Drying**.")
 
-            # Download
             st.download_button(
-                "📥 Download as CSV",
+                "📥 Download filtered CSV",
                 data=sp_df_show.to_csv(index=False).encode("utf-8"),
                 file_name=f"spot_{loaded_area}_{sp_df_show['Tid'].min().date()}_{sp_df_show['Tid'].max().date()}.csv",
                 mime="text/csv",
                 key="sp_download_btn"
             )
 
-            # Log
             with st.expander("📋 Load log"):
-                logs = st.session_state.get("spot_log", [])
-                for lg in reversed(logs[-20:]):
+                for lg in reversed(st.session_state.get("spot_log", [])[-20:]):
                     st.caption(lg)
         else:
-            st.info("Press **Load spot prices** to fetch data for the selected area and period.")
-
-            # Show data coverage note
+            st.info("Upload the CSV file or fetch from ENTSO-E above, then click **Show prices**.")
             st.markdown("""
-            **Pre-installed data coverage:** January 2023 – January 2026  
-            **Live extension:** today/tomorrow via ENTSO-E (auto-updated each session)
+| Area | Region |
+|------|--------|
+| SE1 | Luleå / Northern Sweden |
+| SE2 | Sundsvall / Mid-North Sweden |
+| SE3 | Stockholm / Central Sweden |
+| SE4 | Malmö / **Skåne** / Southern Sweden |
 
-            | Area | Region |
-            |------|--------|
-            | SE1 | Luleå / Northern Sweden |
-            | SE2 | Sundsvall / Mid-North Sweden |
-            | SE3 | Stockholm / Central Sweden |
-            | SE4 | Malmö / Skåne / Southern Sweden |
-
-            > 💡 For the Skåne grain drying use case, select **SE4**.
+> 💡 For the Skåne grain drying use case select **SE4**.
             """)
+
+    # ========================================
+    # TAB 8: FIELD LAYOUT & PHYSICAL DIMENSIONING
+    # ========================================
+
+    with tab8:
+        st.markdown("### 📐 Field Layout & Physical Dimensioning")
+        st.markdown(
+            "Configure the concentrator array layout and get accurate ground area, "
+            "shadow-free spacing and structural requirements."
+        )
+
+        # ── LC24 HW physical dimensions (fixed product specs) ────────
+        # LC24 HW aperture: 24.7 m²  |  depth (N-S): ~5 m  |  width (E-W): ~5.0 m
+        UNIT_DEPTH_M  = 5.0   # N-S dimension (determines row pitch)
+        UNIT_WIDTH_M  = 5.0   # E-W dimension per unit
+
+        fl_col1, fl_col2 = st.columns([1, 1])
+
+        with fl_col1:
+            st.markdown("#### ⚙️ Layout parameters")
+
+            n_units = st.slider("Number of units", min_value=1, max_value=100,
+                                value=int(total_units) if total_units > 0 else 12,
+                                key="fl_n_units")
+
+            n_per_string = st.slider("Units per string (columns)", min_value=1, max_value=12,
+                                     value=min(4, n_units), key="fl_per_string")
+
+            spacing_factor = st.slider("Row spacing factor", min_value=1.0, max_value=3.0,
+                                       value=1.5, step=0.1, key="fl_spacing",
+                                       help="Row pitch = aperture depth × factor. "
+                                            "1.5× = shadow-free at solar elevation ≥34°. "
+                                            "2.0× = shadow-free at ≥27°.")
+
+            col_gap = st.slider("Column gap (m)", min_value=0.5, max_value=5.0,
+                                value=2.0, step=0.5, key="fl_col_gap",
+                                help="Clear gap between adjacent units in a string.")
+
+            dni_factor_pct = st.slider("Location (DNI factor)", min_value=50, max_value=130,
+                                       value=100, key="fl_dni_factor",
+                                       help="Skåne=100%, Mediterranean=115%, Stockholm=90%, Sundsvall=80%")
+            dni_factor = dni_factor_pct / 100.0
+
+            st.caption(
+                "DNI: Skåne=100%, Med=115%, Stockholm=90%, Sundsvall=80%"
+            )
+
+            with st.container(border=True):
+                st.markdown("**Shadow spacing method**")
+                st.markdown(
+                    f"Row spacing = aperture depth × spacing factor.  \n"
+                    f"At **{spacing_factor:.1f}×** the row behind is fully clear of shadow "
+                    f"at solar elevation ≥**{max(5, round(90 - math.degrees(math.atan(spacing_factor)), 0)):.0f}°**. "
+                    f"Higher factors give year-round clear sky access at lower sun angles."
+                )
+
+        # ── Derived geometry ─────────────────────────────────────────
+        n_strings  = math.ceil(n_units / n_per_string)
+        # Some strings may have fewer units if n_units isn't divisible
+        last_string_units = n_units - (n_strings - 1) * n_per_string
+
+        row_pitch   = UNIT_DEPTH_M * spacing_factor          # N-S row-to-row distance
+        col_pitch   = UNIT_WIDTH_M + col_gap                  # E-W unit-to-unit distance
+        shadow_zone = row_pitch - UNIT_DEPTH_M                # gap between rows
+
+        field_width  = n_per_string * col_pitch - col_gap     # E-W  (one string width)
+        field_depth  = n_strings * row_pitch - shadow_zone    # N-S  (rows, no trailing shadow)
+        # Round to nearest 0.5 for clean display
+        field_width_r  = round(field_width / 0.5) * 0.5
+        field_depth_r  = round(field_depth / 0.5) * 0.5
+
+        gross_footprint = field_width_r * field_depth_r
+        aperture_area   = n_units * APERTURE_24
+        gcr_pct         = aperture_area / gross_footprint * 100 if gross_footprint > 0 else 0
+
+        # Energy output with DNI factor applied
+        peak_kw_field  = aperture_area * (DESIGN_DNI_W_M2 / 1000.0) * eta_opt * dni_factor
+        annual_kwh_adj = annual_system_kwh * (aperture_area / max(mirror_area, 1)) * dni_factor \
+                         if mirror_area > 0 else 0.0
+
+        # CO2 offset (biomass reference: 120 kg CO2/MWh)
+        co2_offset_t = annual_kwh_adj / 1000.0 * 120 / 1000.0
+
+        with fl_col2:
+            # ── SVG field diagram ─────────────────────────────────────
+            st.markdown("#### 🗺️ Array footprint diagram")
+
+            SVG_W, SVG_H = 420, 400
+            PAD = 36   # padding for labels
+
+            # Scale to fit SVG canvas
+            draw_w = SVG_W - PAD * 2
+            draw_h = SVG_H - PAD * 2
+            scale  = min(draw_w / field_width_r, draw_h / field_depth_r) if field_width_r > 0 else 1.0
+
+            unit_w_px  = UNIT_WIDTH_M  * scale
+            unit_d_px  = UNIT_DEPTH_M  * scale
+            gap_px     = col_gap       * scale
+            shadow_px  = shadow_zone   * scale
+            col_p_px   = col_pitch     * scale
+            row_p_px   = row_pitch     * scale
+
+            # Draw strings (rows) top-to-bottom, units left-to-right
+            rects_aperture = []
+            rects_shadow   = []
+            dots           = []
+
+            for row in range(n_strings):
+                units_this = n_per_string if row < n_strings - 1 else last_string_units
+                y0 = PAD + row * row_p_px
+                # Shadow zone below each row (except last)
+                if row < n_strings - 1:
+                    rects_shadow.append(
+                        f'<rect x="{PAD}" y="{y0 + unit_d_px:.1f}" '
+                        f'width="{(units_this * col_p_px - gap_px):.1f}" height="{shadow_px:.1f}" '
+                        f'fill="#FFD8D0" stroke="none" rx="2"/>'
+                    )
+                for col in range(units_this):
+                    x0 = PAD + col * col_p_px
+                    rects_aperture.append(
+                        f'<rect x="{x0:.1f}" y="{y0:.1f}" '
+                        f'width="{unit_w_px:.1f}" height="{unit_d_px:.1f}" '
+                        f'fill="#A8C8F0" stroke="#5A8EC8" stroke-width="1.2" rx="3"/>'
+                    )
+                    cx = x0 + unit_w_px / 2
+                    cy = y0 + unit_d_px / 2
+                    dots.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="4" fill="#2C5FA8"/>')
+
+            # Dimension labels
+            total_w_px = n_per_string * col_p_px - gap_px
+            total_h_px = n_strings * row_p_px - shadow_px
+
+            svg = f'''<svg width="{SVG_W}" height="{SVG_H}" xmlns="http://www.w3.org/2000/svg"
+                          style="background:#F8F9FA; border-radius:8px;">
+  <!-- Shadow zones first (behind apertures) -->
+  {"".join(rects_shadow)}
+  <!-- Aperture mirrors -->
+  {"".join(rects_aperture)}
+  <!-- Pillar dots -->
+  {"".join(dots)}
+  <!-- Width dimension -->
+  <line x1="{PAD:.0f}" y1="{PAD + total_h_px + 14:.0f}"
+        x2="{PAD + total_w_px:.0f}" y2="{PAD + total_h_px + 14:.0f}"
+        stroke="#444" stroke-width="1.2" marker-end="url(#arr)" marker-start="url(#arr)"/>
+  <text x="{PAD + total_w_px/2:.0f}" y="{PAD + total_h_px + 26:.0f}"
+        text-anchor="middle" font-size="11" fill="#333">{field_width_r:.0f} m</text>
+  <!-- Height dimension -->
+  <line x1="{PAD - 14:.0f}" y1="{PAD:.0f}"
+        x2="{PAD - 14:.0f}" y2="{PAD + total_h_px:.0f}"
+        stroke="#444" stroke-width="1.2"/>
+  <text x="{PAD - 18:.0f}" y="{PAD + total_h_px/2:.0f}"
+        text-anchor="middle" font-size="11" fill="#333"
+        transform="rotate(-90, {PAD - 18:.0f}, {PAD + total_h_px/2:.0f})">{field_depth_r:.0f} m</text>
+  <!-- Legend -->
+  <rect x="{PAD:.0f}" y="{SVG_H - 22:.0f}" width="12" height="12" fill="#A8C8F0" stroke="#5A8EC8" stroke-width="1"/>
+  <text x="{PAD + 16:.0f}" y="{SVG_H - 12:.0f}" font-size="10" fill="#444">Mirror aperture</text>
+  <rect x="{PAD + 110:.0f}" y="{SVG_H - 22:.0f}" width="12" height="12" fill="#FFD8D0"/>
+  <text x="{PAD + 126:.0f}" y="{SVG_H - 12:.0f}" font-size="10" fill="#444">Shadow zone</text>
+  <circle cx="{PAD + 230:.0f}" cy="{SVG_H - 16:.0f}" r="4" fill="#2C5FA8"/>
+  <text x="{PAD + 238:.0f}" y="{SVG_H - 12:.0f}" font-size="10" fill="#444">Pillar (1 m² found.)</text>
+  <!-- Arrow marker -->
+  <defs>
+    <marker id="arr" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#444"/>
+    </marker>
+  </defs>
+</svg>'''
+            st.markdown(svg, unsafe_allow_html=True)
+
+        # ── KPI metrics ───────────────────────────────────────────────
+        st.markdown("---")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total field area",
+                  f"{field_width_r:.0f} × {field_depth_r:.0f} m",
+                  delta=f"{gross_footprint:,.0f} m² gross footprint")
+        m2.metric("Total aperture area",
+                  f"{aperture_area:.1f} m²",
+                  delta=f"GCR: {gcr_pct:.0f}% of ground area")
+        m3.metric("Peak thermal output",
+                  f"{peak_kw_field:,.0f} kW",
+                  delta=f"at 1,000 W/m² DNI, η = {eta_opt_pct}%")
+        annual_label = f"{annual_kwh_adj/1000:,.1f} MWh/yr" if annual_kwh_adj >= 1000 \
+                       else f"{annual_kwh_adj:,.0f} kWh/yr"
+        m4.metric("Annual yield (adj.)",
+                  annual_label,
+                  delta=f"{annual_kwh_adj/1e6:.3f} GWh/yr")
+
+        m5, m6, m7 = st.columns(3)
+        m5.metric("CO₂ offset (biomass ref.)",
+                  f"{co2_offset_t:.1f} t/yr",
+                  delta="@ 120 kg CO₂/MWh")
+        m6.metric("Pillar foundations",
+                  f"{n_units} × 1 m²",
+                  delta=f"{n_units} m² total foundation area")
+        m7.metric("Array layout",
+                  f"{n_strings} strings × {n_per_string}",
+                  delta="Unlimited parallel expansion")
+
+        # ── Detailed spacing table ────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### 📏 Spacing & pitch details")
+        detail_data = {
+            "Parameter": [
+                "Unit aperture (LC24 HW)",
+                "Unit depth (N–S)",
+                "Unit width (E–W)",
+                "Row pitch (N–S, centre–centre)",
+                "Shadow zone (inter-row gap)",
+                "Column pitch (E–W, centre–centre)",
+                "Column gap (clear between units)",
+                "Shadow-free solar elevation",
+                "Strings (rows)",
+                "Units per string",
+                "Total units",
+            ],
+            "Value": [
+                f"{APERTURE_24} m²",
+                f"{UNIT_DEPTH_M} m",
+                f"{UNIT_WIDTH_M} m",
+                f"{row_pitch:.2f} m  ({spacing_factor:.1f}× depth)",
+                f"{shadow_zone:.2f} m",
+                f"{col_pitch:.2f} m",
+                f"{col_gap:.1f} m",
+                f"≥ {max(5, round(90 - math.degrees(math.atan(spacing_factor)), 0)):.0f}°",
+                f"{n_strings}",
+                f"{n_per_string} (last string: {last_string_units})" if last_string_units != n_per_string else f"{n_per_string}",
+                f"{n_units}",
+            ]
+        }
+        st.dataframe(pd.DataFrame(detail_data), use_container_width=True, hide_index=True)
+
+        # ── Summary bar ───────────────────────────────────────────────
+        st.markdown("---")
+        st.info(
+            f"**{n_units} × LC24 HW** | {n_strings} parallel string{'s' if n_strings > 1 else ''} "
+            f"of {n_per_string} units in hydraulic series | "
+            f"Row pitch: {row_pitch:.1f} m | Column pitch: {col_pitch:.1f} m | "
+            f"Shadow-free above **{max(5, round(90 - math.degrees(math.atan(spacing_factor)), 0)):.0f}° solar elevation** | "
+            f"Min. spacing factor {spacing_factor:.1f}× depth ({UNIT_DEPTH_M} m) = {row_pitch:.1f} m row pitch"
+        )
 
     st.markdown("---")
     st.markdown("*Helixis Solar Concentrator Calculator - Results generated: " + 
