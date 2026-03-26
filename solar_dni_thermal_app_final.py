@@ -1433,17 +1433,21 @@ MONTHLY PRODUCTION (kWh)
         UNIT_DEPTH_M  = 5.0   # N-S dimension (determines row pitch)
         UNIT_WIDTH_M  = 5.0   # E-W dimension per unit
 
+        # Use unit count from sidebar — no duplication
+        n_units = int(total_units) if total_units > 0 else 1
+
         fl_col1, fl_col2 = st.columns([1, 1])
 
         with fl_col1:
             st.markdown("#### ⚙️ Layout parameters")
+            st.caption(
+                f"Using **{n_units} units** and optical efficiency **{eta_opt_pct}%** "
+                f"from the sidebar. Only physical spacing is configured here."
+            )
 
-            n_units = st.slider("Number of units", min_value=1, max_value=100,
-                                value=int(total_units) if total_units > 0 else 12,
-                                key="fl_n_units")
-
-            n_per_string = st.slider("Units per string (columns)", min_value=1, max_value=12,
-                                     value=min(4, n_units), key="fl_per_string")
+            n_per_string = st.slider("Units per string (columns)", min_value=1,
+                                     max_value=max(1, n_units), key="fl_per_string",
+                                     value=min(4, n_units))
 
             spacing_factor = st.slider("Row spacing factor", min_value=1.0, max_value=3.0,
                                        value=1.5, step=0.1, key="fl_spacing",
@@ -1454,15 +1458,6 @@ MONTHLY PRODUCTION (kWh)
             col_gap = st.slider("Column gap (m)", min_value=0.5, max_value=5.0,
                                 value=2.0, step=0.5, key="fl_col_gap",
                                 help="Clear gap between adjacent units in a string.")
-
-            dni_factor_pct = st.slider("Location (DNI factor)", min_value=50, max_value=130,
-                                       value=100, key="fl_dni_factor",
-                                       help="Skåne=100%, Mediterranean=115%, Stockholm=90%, Sundsvall=80%")
-            dni_factor = dni_factor_pct / 100.0
-
-            st.caption(
-                "DNI: Skåne=100%, Med=115%, Stockholm=90%, Sundsvall=80%"
-            )
 
             with st.container(border=True):
                 st.markdown("**Shadow spacing method**")
@@ -1475,16 +1470,14 @@ MONTHLY PRODUCTION (kWh)
 
         # ── Derived geometry ─────────────────────────────────────────
         n_strings  = math.ceil(n_units / n_per_string)
-        # Some strings may have fewer units if n_units isn't divisible
         last_string_units = n_units - (n_strings - 1) * n_per_string
 
-        row_pitch   = UNIT_DEPTH_M * spacing_factor          # N-S row-to-row distance
-        col_pitch   = UNIT_WIDTH_M + col_gap                  # E-W unit-to-unit distance
-        shadow_zone = row_pitch - UNIT_DEPTH_M                # gap between rows
+        row_pitch   = UNIT_DEPTH_M * spacing_factor
+        col_pitch   = UNIT_WIDTH_M + col_gap
+        shadow_zone = row_pitch - UNIT_DEPTH_M
 
-        field_width  = n_per_string * col_pitch - col_gap     # E-W  (one string width)
-        field_depth  = n_strings * row_pitch - shadow_zone    # N-S  (rows, no trailing shadow)
-        # Round to nearest 0.5 for clean display
+        field_width  = n_per_string * col_pitch - col_gap
+        field_depth  = n_strings * row_pitch - shadow_zone
         field_width_r  = round(field_width / 0.5) * 0.5
         field_depth_r  = round(field_depth / 0.5) * 0.5
 
@@ -1492,99 +1485,125 @@ MONTHLY PRODUCTION (kWh)
         aperture_area   = n_units * APERTURE_24
         gcr_pct         = aperture_area / gross_footprint * 100 if gross_footprint > 0 else 0
 
-        # Energy output with DNI factor applied
-        peak_kw_field  = aperture_area * (DESIGN_DNI_W_M2 / 1000.0) * eta_opt * dni_factor
-        annual_kwh_adj = annual_system_kwh * (aperture_area / max(mirror_area, 1)) * dni_factor \
-                         if mirror_area > 0 else 0.0
+        # Energy output — based on uploaded DNI file, scaled to this layout
+        peak_kw_field  = aperture_area * (DESIGN_DNI_W_M2 / 1000.0) * eta_opt
+        annual_kwh_field = annual_system_kwh * (aperture_area / max(mirror_area, 1)) \
+                           if mirror_area > 0 else 0.0
 
         # CO2 offset (biomass reference: 120 kg CO2/MWh)
-        co2_offset_t = annual_kwh_adj / 1000.0 * 120 / 1000.0
+        co2_offset_t = annual_kwh_field / 1000.0 * 120 / 1000.0
 
         with fl_col2:
-            # ── SVG field diagram ─────────────────────────────────────
+            # ── SVG field diagram via components.html ─────────────────
             st.markdown("#### 🗺️ Array footprint diagram")
+            import streamlit.components.v1 as _components
 
-            SVG_W, SVG_H = 420, 400
-            PAD = 36   # padding for labels
+            SVG_W, SVG_H = 460, 420
+            PAD_L = 44   # left padding for height label
+            PAD_T = 16   # top
+            PAD_B = 50   # bottom for width label + legend
+            PAD_R = 16   # right
 
-            # Scale to fit SVG canvas
-            draw_w = SVG_W - PAD * 2
-            draw_h = SVG_H - PAD * 2
-            scale  = min(draw_w / field_width_r, draw_h / field_depth_r) if field_width_r > 0 else 1.0
+            draw_w = SVG_W - PAD_L - PAD_R
+            draw_h = SVG_H - PAD_T - PAD_B
 
-            unit_w_px  = UNIT_WIDTH_M  * scale
-            unit_d_px  = UNIT_DEPTH_M  * scale
-            gap_px     = col_gap       * scale
-            shadow_px  = shadow_zone   * scale
-            col_p_px   = col_pitch     * scale
-            row_p_px   = row_pitch     * scale
+            # Scale so the full array fits
+            scale = min(draw_w / max(field_width_r, 0.1),
+                        draw_h / max(field_depth_r, 0.1))
 
-            # Draw strings (rows) top-to-bottom, units left-to-right
-            rects_aperture = []
-            rects_shadow   = []
-            dots           = []
+            unit_w_px = UNIT_WIDTH_M * scale
+            unit_d_px = UNIT_DEPTH_M * scale
+            col_p_px  = col_pitch    * scale
+            row_p_px  = row_pitch    * scale
+            shadow_px = shadow_zone  * scale
+
+            shapes = []
 
             for row in range(n_strings):
                 units_this = n_per_string if row < n_strings - 1 else last_string_units
-                y0 = PAD + row * row_p_px
-                # Shadow zone below each row (except last)
+                y0 = PAD_T + row * row_p_px
+                # Shadow zone (pink strip between rows)
                 if row < n_strings - 1:
-                    rects_shadow.append(
-                        f'<rect x="{PAD}" y="{y0 + unit_d_px:.1f}" '
-                        f'width="{(units_this * col_p_px - gap_px):.1f}" height="{shadow_px:.1f}" '
-                        f'fill="#FFD8D0" stroke="none" rx="2"/>'
+                    sw = units_this * col_p_px - (col_pitch - UNIT_WIDTH_M) * scale
+                    shapes.append(
+                        f'<rect x="{PAD_L:.1f}" y="{y0 + unit_d_px:.1f}" '
+                        f'width="{sw:.1f}" height="{shadow_px:.1f}" '
+                        f'fill="#FDDDD8" stroke="none"/>'
                     )
                 for col in range(units_this):
-                    x0 = PAD + col * col_p_px
-                    rects_aperture.append(
+                    x0 = PAD_L + col * col_p_px
+                    # Mirror aperture (blue)
+                    shapes.append(
                         f'<rect x="{x0:.1f}" y="{y0:.1f}" '
                         f'width="{unit_w_px:.1f}" height="{unit_d_px:.1f}" '
-                        f'fill="#A8C8F0" stroke="#5A8EC8" stroke-width="1.2" rx="3"/>'
+                        f'fill="#A8C8F0" stroke="#4A7EC0" stroke-width="1.5" rx="3"/>'
                     )
+                    # Pillar dot
                     cx = x0 + unit_w_px / 2
                     cy = y0 + unit_d_px / 2
-                    dots.append(f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="4" fill="#2C5FA8"/>')
+                    shapes.append(
+                        f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="5" '
+                        f'fill="#1E3A6E" opacity="0.7"/>'
+                    )
 
-            # Dimension labels
-            total_w_px = n_per_string * col_p_px - gap_px
+            total_w_px = n_per_string * col_p_px - (col_pitch - UNIT_WIDTH_M) * scale
             total_h_px = n_strings * row_p_px - shadow_px
 
-            svg = f'''<svg width="{SVG_W}" height="{SVG_H}" xmlns="http://www.w3.org/2000/svg"
-                          style="background:#F8F9FA; border-radius:8px;">
-  <!-- Shadow zones first (behind apertures) -->
-  {"".join(rects_shadow)}
-  <!-- Aperture mirrors -->
-  {"".join(rects_aperture)}
-  <!-- Pillar dots -->
-  {"".join(dots)}
-  <!-- Width dimension -->
-  <line x1="{PAD:.0f}" y1="{PAD + total_h_px + 14:.0f}"
-        x2="{PAD + total_w_px:.0f}" y2="{PAD + total_h_px + 14:.0f}"
-        stroke="#444" stroke-width="1.2" marker-end="url(#arr)" marker-start="url(#arr)"/>
-  <text x="{PAD + total_w_px/2:.0f}" y="{PAD + total_h_px + 26:.0f}"
-        text-anchor="middle" font-size="11" fill="#333">{field_width_r:.0f} m</text>
-  <!-- Height dimension -->
-  <line x1="{PAD - 14:.0f}" y1="{PAD:.0f}"
-        x2="{PAD - 14:.0f}" y2="{PAD + total_h_px:.0f}"
-        stroke="#444" stroke-width="1.2"/>
-  <text x="{PAD - 18:.0f}" y="{PAD + total_h_px/2:.0f}"
-        text-anchor="middle" font-size="11" fill="#333"
-        transform="rotate(-90, {PAD - 18:.0f}, {PAD + total_h_px/2:.0f})">{field_depth_r:.0f} m</text>
-  <!-- Legend -->
-  <rect x="{PAD:.0f}" y="{SVG_H - 22:.0f}" width="12" height="12" fill="#A8C8F0" stroke="#5A8EC8" stroke-width="1"/>
-  <text x="{PAD + 16:.0f}" y="{SVG_H - 12:.0f}" font-size="10" fill="#444">Mirror aperture</text>
-  <rect x="{PAD + 110:.0f}" y="{SVG_H - 22:.0f}" width="12" height="12" fill="#FFD8D0"/>
-  <text x="{PAD + 126:.0f}" y="{SVG_H - 12:.0f}" font-size="10" fill="#444">Shadow zone</text>
-  <circle cx="{PAD + 230:.0f}" cy="{SVG_H - 16:.0f}" r="4" fill="#2C5FA8"/>
-  <text x="{PAD + 238:.0f}" y="{SVG_H - 12:.0f}" font-size="10" fill="#444">Pillar (1 m² found.)</text>
-  <!-- Arrow marker -->
+            # Dimension arrows
+            aw = PAD_L + total_w_px   # right edge
+            ah = PAD_T + total_h_px   # bottom edge
+            dim_y = ah + 18
+            dim_x = PAD_L - 22
+
+            html_content = f"""<!DOCTYPE html>
+<html><body style="margin:0;padding:0;background:transparent;">
+<svg width="{SVG_W}" height="{SVG_H}" xmlns="http://www.w3.org/2000/svg"
+     style="background:#F5F7FA;border-radius:10px;border:1px solid #DDE3EC;">
   <defs>
-    <marker id="arr" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto">
-      <path d="M0,0 L6,3 L0,6 Z" fill="#444"/>
+    <marker id="ah" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto">
+      <path d="M1,1 L7,4 L1,7 Z" fill="#555"/>
+    </marker>
+    <marker id="ah2" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto-start-reverse">
+      <path d="M1,1 L7,4 L1,7 Z" fill="#555"/>
     </marker>
   </defs>
-</svg>'''
-            st.markdown(svg, unsafe_allow_html=True)
+
+  {"".join(shapes)}
+
+  <!-- Width dimension line -->
+  <line x1="{PAD_L:.0f}" y1="{dim_y:.0f}" x2="{aw:.0f}" y2="{dim_y:.0f}"
+        stroke="#555" stroke-width="1" marker-end="url(#ah)" marker-start="url(#ah2)"/>
+  <text x="{(PAD_L + aw)/2:.0f}" y="{dim_y + 13:.0f}"
+        text-anchor="middle" font-size="12" font-family="sans-serif" fill="#333">
+    {field_width_r:.0f} m
+  </text>
+
+  <!-- Height dimension line -->
+  <line x1="{dim_x:.0f}" y1="{PAD_T:.0f}" x2="{dim_x:.0f}" y2="{ah:.0f}"
+        stroke="#555" stroke-width="1" marker-end="url(#ah)" marker-start="url(#ah2)"/>
+  <text x="{dim_x - 8:.0f}" y="{(PAD_T + ah)/2:.0f}"
+        text-anchor="middle" font-size="12" font-family="sans-serif" fill="#333"
+        transform="rotate(-90,{dim_x - 8:.0f},{(PAD_T + ah)/2:.0f})">
+    {field_depth_r:.0f} m
+  </text>
+
+  <!-- Legend -->
+  <rect x="{PAD_L:.0f}" y="{SVG_H - 24:.0f}" width="13" height="13"
+        fill="#A8C8F0" stroke="#4A7EC0" stroke-width="1" rx="2"/>
+  <text x="{PAD_L + 17:.0f}" y="{SVG_H - 14:.0f}"
+        font-size="11" font-family="sans-serif" fill="#444">Mirror aperture</text>
+  <rect x="{PAD_L + 118:.0f}" y="{SVG_H - 24:.0f}" width="13" height="13"
+        fill="#FDDDD8" rx="2"/>
+  <text x="{PAD_L + 135:.0f}" y="{SVG_H - 14:.0f}"
+        font-size="11" font-family="sans-serif" fill="#444">Shadow zone</text>
+  <circle cx="{PAD_L + 247:.0f}" cy="{SVG_H - 18:.0f}" r="5"
+          fill="#1E3A6E" opacity="0.7"/>
+  <text x="{PAD_L + 256:.0f}" y="{SVG_H - 14:.0f}"
+        font-size="11" font-family="sans-serif" fill="#444">Pillar (1 m²)</text>
+</svg>
+</body></html>"""
+
+            _components.html(html_content, height=SVG_H + 10, scrolling=False)
 
         # ── KPI metrics ───────────────────────────────────────────────
         st.markdown("---")
@@ -1598,11 +1617,11 @@ MONTHLY PRODUCTION (kWh)
         m3.metric("Peak thermal output",
                   f"{peak_kw_field:,.0f} kW",
                   delta=f"at 1,000 W/m² DNI, η = {eta_opt_pct}%")
-        annual_label = f"{annual_kwh_adj/1000:,.1f} MWh/yr" if annual_kwh_adj >= 1000 \
-                       else f"{annual_kwh_adj:,.0f} kWh/yr"
-        m4.metric("Annual yield (adj.)",
+        annual_label = f"{annual_kwh_field/1000:,.1f} MWh/yr" if annual_kwh_field >= 1000 \
+                       else f"{annual_kwh_field:,.0f} kWh/yr"
+        m4.metric("Annual yield (from file)",
                   annual_label,
-                  delta=f"{annual_kwh_adj/1e6:.3f} GWh/yr")
+                  delta=f"{annual_kwh_field/1e6:.3f} GWh/yr")
 
         m5, m6, m7 = st.columns(3)
         m5.metric("CO₂ offset (biomass ref.)",
