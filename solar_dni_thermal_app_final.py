@@ -1446,11 +1446,13 @@ MONTHLY PRODUCTION (kWh)
             )
 
             n_per_string_max = max(1, n_units)
-            n_per_string_val = min(int(st.session_state.get("fl_per_string", min(4, n_units))),
-                                   n_per_string_max)
+            # Clamp session state directly so the slider never gets an out-of-range value
+            if st.session_state.get("fl_per_string", 1) > n_per_string_max:
+                st.session_state["fl_per_string"] = n_per_string_max
+            if "fl_per_string" not in st.session_state:
+                st.session_state["fl_per_string"] = min(4, n_units)
             n_per_string = st.slider("Units per string (columns)", min_value=1,
-                                     max_value=n_per_string_max, key="fl_per_string",
-                                     value=n_per_string_val)
+                                     max_value=n_per_string_max, key="fl_per_string")
 
             spacing_factor = st.slider("Row spacing factor", min_value=1.0, max_value=3.0,
                                        value=1.5, step=0.1, key="fl_spacing",
