@@ -1071,15 +1071,20 @@ MONTHLY PRODUCTION (kWh)
                     el_op_h   = st.slider("Max operating hours/day", 1, 24, 8, key="dry_el_h")
 
                     # ── Spot price detection: accept any loaded source ──
-                    _spot_src = (
-                        st.session_state.get("drying_spot_df") or
-                        st.session_state.get("sp_loaded_df") or
-                        (lambda df: df[["Tid", next(c for c in df.columns if c.endswith("_kr_kwh"))]]
-                            .rename(columns={next(c for c in df.columns if c.endswith("_kr_kwh")): "spotpris"})
-                            if df is not None and any(c.endswith("_kr_kwh") for c in df.columns) else None
-                        )(st.session_state.get("spot_full_extended"))
-                    )
-                    _spot_loaded = _spot_src is not None and not _spot_src.empty if hasattr(_spot_src, "empty") else False
+                    _spot_src = None
+                    if st.session_state.get("drying_spot_df") is not None:
+                        _spot_src = st.session_state["drying_spot_df"]
+                    elif st.session_state.get("sp_loaded_df") is not None:
+                        _spot_src = st.session_state["sp_loaded_df"]
+                    else:
+                        _full = st.session_state.get("spot_full_extended")
+                        if _full is not None:
+                            _kr_cols = [c for c in _full.columns if c.endswith("_kr_kwh")]
+                            if _kr_cols:
+                                _spot_src = _full[["Tid", _kr_cols[0]]].rename(
+                                    columns={_kr_cols[0]: "spotpris"}
+                                )
+                    _spot_loaded = _spot_src is not None and len(_spot_src) > 0
 
                     if _spot_loaded:
                         # Store for simulation use
