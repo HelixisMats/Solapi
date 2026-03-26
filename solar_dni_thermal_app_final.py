@@ -143,6 +143,7 @@ def _load_preinstalled_spotprices(area: str, start_date, end_date, force_reload:
     full_cache_key = 'spot_full_extended'
     if force_reload or full_cache_key not in st.session_state:
         fname = 'spotpriser_2023_2026.csv'
+        GITHUB_URL = "https://raw.githubusercontent.com/eraimon/batterysimulation/main/spotpriser_2023_2026.csv"
         possible_paths = [
             fname,
             '/mount/src/batterysimulation/' + fname,
@@ -152,7 +153,10 @@ def _load_preinstalled_spotprices(area: str, start_date, end_date, force_reload:
             possible_paths.append(os.path.join(os.path.dirname(__file__), fname))
         except Exception:
             pass
+
         spot_df_full = None
+
+        # Try local paths first
         for path in possible_paths:
             try:
                 if os.path.exists(path):
@@ -161,18 +165,34 @@ def _load_preinstalled_spotprices(area: str, start_date, end_date, force_reload:
                     break
             except Exception:
                 continue
+
+        # Always try GitHub — it is the canonical source
         if spot_df_full is None:
+            _add_spot_log(f"Local file not found — fetching from GitHub...")
             try:
+                resp = requests.get(GITHUB_URL, timeout=30)
+                resp.raise_for_status()
                 spot_df_full = pd.read_csv(
-                    "https://raw.githubusercontent.com/eraimon/batterysimulation/main/spotpriser_2023_2026.csv",
-                    sep=',', decimal='.', parse_dates=['Tid']
+                    io.StringIO(resp.text), sep=',', decimal='.', parse_dates=['Tid']
                 )
-                _add_spot_log("Loaded spot prices from GitHub (fallback)")
+                _add_spot_log(f"Loaded {len(spot_df_full):,} rows from GitHub")
+                # Cache locally for next run
+                try:
+                    spot_df_full.to_csv(fname, index=False)
+                    _add_spot_log(f"Cached to {fname}")
+                except Exception:
+                    pass
             except Exception as e:
-                _add_spot_log(f"Could not load spot prices: {e}")
+                _add_spot_log(f"GitHub fetch failed: {e}")
+                st.session_state['spot_load_error'] = (
+                    f"Could not load spot prices from GitHub: {e}  \n"
+                    f"URL tried: `{GITHUB_URL}`"
+                )
                 return None
+
         if spot_df_full is None:
             return None
+        st.session_state.pop('spot_load_error', None)
         spot_df_full = _extend_spot_with_live_data(spot_df_full)
         st.session_state[full_cache_key] = spot_df_full
     else:
@@ -1298,10 +1318,16 @@ MONTHLY PRODUCTION (kWh)
                     f"({sp_df['Tid'].min().date()} → {sp_df['Tid'].max().date()})"
                 )
             else:
+                _load_err = st.session_state.get('spot_load_error', '')
                 st.error(
-                    "❌ Could not load spot prices. "
-                    "Make sure `spotpriser_2023_2026.csv` is in the app folder, "
-                    "or use the manual ENTSO-E fetch below."
+                    "❌ Could not load spot prices.  \n"
+                    + (_load_err if _load_err else
+                       "Make sure `spotpriser_2023_2026.csv` is in the app folder "
+                       "or that the GitHub repo `eraimon/batterysimulation` is publicly accessible.")
+                )
+                st.info(
+                    "💡 **Alternative:** Use the **Manual ENTSO-E fetch** expander below "
+                    "to download spot prices directly from ENTSO-E Transparency Platform."
                 )
 
         # Live status banner
