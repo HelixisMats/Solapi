@@ -360,7 +360,7 @@ if uploaded is not None:
         "📆 Monthly Data",
         "📊 Input DNI Data",
         "💾 Export",
-        "🌾 Torkning"
+        "🌾 Grain Drying"
     ])
     
     # ========================================
@@ -671,25 +671,25 @@ MONTHLY PRODUCTION (kWh)
     # ========================================
 
     with tab6:
-        st.markdown("### 🌾 Spannmålstorkning – Solvärmeanalys")
+        st.markdown("### 🌾 Grain Drying – Solar Heat Analysis")
         st.markdown(
-            "Beräkna hur solvärme, termiskt lager och kompletterande värmekällor "
-            "kan möta torkbehovet under skördeperioden."
+            "Calculate how solar heat, thermal storage and supplementary heat sources "
+            "can meet the drying energy demand during the harvest season."
         )
 
         # ── Period selection ──────────────────────────────────────
-        st.markdown("#### 📅 Torkningsperiod")
+        st.markdown("#### 📅 Drying Period")
         MONTH_ORDER = list(DAYS_IN_MONTH.keys())
         col_p1, col_p2 = st.columns(2)
         with col_p1:
             start_month = st.selectbox(
-                "Startmånad", MONTH_ORDER,
+                "Start month", MONTH_ORDER,
                 index=MONTH_ORDER.index("Jul"),
                 key="dry_start"
             )
         with col_p2:
             end_month = st.selectbox(
-                "Slutmånad", MONTH_ORDER,
+                "End month", MONTH_ORDER,
                 index=MONTH_ORDER.index("Aug"),
                 key="dry_end"
             )
@@ -697,14 +697,14 @@ MONTHLY PRODUCTION (kWh)
         start_idx = MONTH_ORDER.index(start_month)
         end_idx   = MONTH_ORDER.index(end_month)
         if end_idx < start_idx:
-            st.warning("⚠️ Slutmånad är före startmånad – byt ordning.")
+            st.warning("⚠️ End month is before start month – please swap them.")
             selected_months = []
         else:
             selected_months = MONTH_ORDER[start_idx : end_idx + 1]
             period_days = sum(DAYS_IN_MONTH[m] for m in selected_months)
             st.info(
-                f"**Vald period:** {start_month} – {end_month} "
-                f"({len(selected_months)} månader, {period_days} dagar)"
+                f"**Selected period:** {start_month} – {end_month} "
+                f"({len(selected_months)} months, {period_days} days)"
             )
 
         if selected_months:
@@ -713,21 +713,21 @@ MONTHLY PRODUCTION (kWh)
             period_daily_kwh = daily_system_kwh[selected_months]
 
             # ── Drying demand ────────────────────────────────────
-            st.markdown("#### ⚡ Torkningsbehov")
+            st.markdown("#### ⚡ Drying Energy Demand")
             col_d1, col_d2, col_d3 = st.columns(3)
             with col_d1:
                 grain_tonnes = st.number_input(
-                    "Säd att torka [ton]", min_value=0.1, value=500.0, step=50.0,
+                    "Grain to dry [tonnes]", min_value=0.1, value=500.0, step=50.0,
                     key="dry_tonnes"
                 )
             with col_d2:
                 mc_in = st.number_input(
-                    "Inkommande fuktighet [%]", min_value=1.0, max_value=40.0,
+                    "Incoming moisture content [%]", min_value=1.0, max_value=40.0,
                     value=20.0, step=0.5, key="dry_mc_in"
                 )
             with col_d3:
                 mc_out = st.number_input(
-                    "Önskad slutfuktighet [%]", min_value=1.0, max_value=30.0,
+                    "Target moisture content [%]", min_value=1.0, max_value=30.0,
                     value=14.0, step=0.5, key="dry_mc_out"
                 )
 
@@ -737,42 +737,42 @@ MONTHLY PRODUCTION (kWh)
             water_to_remove_kg = grain_tonnes * 1000.0 * (mc_in_f - mc_out_f) / (1.0 - mc_out_f)
             # Specific energy for hot-air grain drying ≈ 1 000 kWh/ton water (practical value)
             specific_energy_kwh_t = st.slider(
-                "Specifik energi för torkning [kWh / ton vatten bortförd]",
+                "Specific drying energy [kWh / tonne of water removed]",
                 min_value=600, max_value=2000, value=1000, step=50,
                 key="dry_specific",
-                help="Typiskt 800–1 200 kWh/ton vatten. Lägre värde = effektivare tork."
+                help="Typically 800–1 200 kWh/tonne of water. Lower = more efficient dryer."
             )
             total_drying_kwh = (water_to_remove_kg / 1000.0) * specific_energy_kwh_t
 
             col_r1, col_r2, col_r3 = st.columns(3)
             with col_r1:
-                st.metric("Vatten att avlägsna", f"{water_to_remove_kg/1000:.1f} ton")
+                st.metric("Water to remove", f"{water_to_remove_kg/1000:.1f} tonnes")
             with col_r2:
-                st.metric("Totalt torkbehov", f"{total_drying_kwh:,.0f} kWh")
+                st.metric("Total drying demand", f"{total_drying_kwh:,.0f} kWh")
             with col_r3:
                 solar_coverage_pct = min(period_solar_kwh / total_drying_kwh * 100, 100) \
                     if total_drying_kwh > 0 else 0
-                st.metric("Solvärme täcker", f"{solar_coverage_pct:.1f} %")
+                st.metric("Solar heat covers", f"{solar_coverage_pct:.1f} %")
 
             # ── Thermal storage ──────────────────────────────────
-            st.markdown("#### 🔋 Termiskt lager")
+            st.markdown("#### 🔋 Thermal Storage")
             st.markdown(
-                "Ett termiskt lager jämnar ut soleffekten över dygnet och minskar "
-                "behovet av kompletterande energikällor."
+                "A thermal storage buffer smooths solar output across the day and reduces "
+                "reliance on supplementary heat sources."
             )
             col_s1, col_s2, col_s3 = st.columns(3)
             with col_s1:
                 storage_kwh = st.number_input(
-                    "Lagerkapacitet [kWh]", min_value=0.0, value=200.0, step=10.0,
+                    "Storage capacity [kWh]", min_value=0.0, value=200.0, step=10.0,
                     key="dry_storage"
                 )
             with col_s2:
                 storage_eff = st.slider(
-                    "Lagringsverkningsgrad [%]", 50, 99, 90, key="dry_stor_eff"
+                    "Storage efficiency [%]", 50, 99, 90, key="dry_stor_eff"
                 ) / 100.0
             with col_s3:
                 daily_demand_kwh = total_drying_kwh / period_days if period_days > 0 else 0
-                st.metric("Genomsnittligt dagsbehov", f"{daily_demand_kwh:.0f} kWh/dag")
+                st.metric("Average daily demand", f"{daily_demand_kwh:.0f} kWh/day")
 
             # Simulate day-by-day storage effect for selected months
             daily_solar_list = []
@@ -818,45 +818,45 @@ MONTHLY PRODUCTION (kWh)
             col_t1, col_t2, col_t3 = st.columns(3)
             with col_t1:
                 st.metric(
-                    "Sol + lager täcker",
+                    "Solar + storage covers",
                     f"{storage_coverage:.1f} %",
-                    delta=f"+{storage_coverage - solar_coverage_pct:.1f} % vs utan lager"
+                    delta=f"+{storage_coverage - solar_coverage_pct:.1f} % vs no storage"
                 )
             with col_t2:
-                st.metric("Kvarstående underskott", f"{total_deficit_kwh:,.0f} kWh")
+                st.metric("Remaining deficit", f"{total_deficit_kwh:,.0f} kWh")
             with col_t3:
                 days_deficit = sum(1 for d in deficit if d > 5)
-                st.metric("Dagar med underskott (>5 kWh)", f"{days_deficit} dagar")
+                st.metric("Days with deficit (>5 kWh)", f"{days_deficit} days")
 
             # ── Backup heat sources ──────────────────────────────
-            st.markdown("#### 🔌 Kompletterande värmekällor")
+            st.markdown("#### 🔌 Supplementary Heat Sources")
             col_b1, col_b2 = st.columns(2)
 
             with col_b1:
-                st.markdown("**⚡ Elpatron**")
-                use_el = st.checkbox("Inkludera elpatron", value=True, key="dry_use_el")
+                st.markdown("**⚡ Electric heater**")
+                use_el = st.checkbox("Include electric heater", value=True, key="dry_use_el")
                 el_price = st.number_input(
-                    "Elpris [€/kWh]", min_value=0.01, value=0.12, step=0.01,
+                    "Electricity price [€/kWh]", min_value=0.01, value=0.12, step=0.01,
                     key="dry_el_price"
                 ) if use_el else 0.0
                 el_capacity_kw = st.number_input(
-                    "Elpatroneffekt [kW]", min_value=1.0, value=50.0, step=5.0,
+                    "Heater capacity [kW]", min_value=1.0, value=50.0, step=5.0,
                     key="dry_el_cap"
                 ) if use_el else 0.0
 
             with col_b2:
-                st.markdown("**🔄 Värmepump**")
-                use_hp = st.checkbox("Inkludera värmepump", value=False, key="dry_use_hp")
+                st.markdown("**🔄 Heat pump**")
+                use_hp = st.checkbox("Include heat pump", value=False, key="dry_use_hp")
                 cop = st.number_input(
                     "COP", min_value=1.0, max_value=8.0, value=3.0, step=0.1,
                     key="dry_hp_cop"
                 ) if use_hp else 1.0
                 hp_price = st.number_input(
-                    "Elpris VP [€/kWh]", min_value=0.01, value=0.10, step=0.01,
+                    "Electricity price HP [€/kWh]", min_value=0.01, value=0.10, step=0.01,
                     key="dry_hp_price"
                 ) if use_hp else 0.0
                 hp_capacity_kw = st.number_input(
-                    "VP värmeeffekt [kW]", min_value=1.0, value=50.0, step=5.0,
+                    "HP heat output [kW]", min_value=1.0, value=50.0, step=5.0,
                     key="dry_hp_cap"
                 ) if use_hp else 0.0
 
@@ -878,11 +878,11 @@ MONTHLY PRODUCTION (kWh)
             hp_cost  = hp_el * hp_price
 
             # ── Cost comparison ──────────────────────────────────
-            st.markdown("#### 💰 Ekonomisk jämförelse")
+            st.markdown("#### 💰 Economic Comparison")
 
             # Reference: all heat from pellets
             pellets_price = st.number_input(
-                "Referenspris pellets / olja [€/kWh]", min_value=0.01, value=0.08,
+                "Reference price pellets / fuel oil [€/kWh]", min_value=0.01, value=0.08,
                 step=0.01, key="dry_pellets"
             )
             ref_cost_all_pellets = total_drying_kwh * pellets_price
@@ -898,41 +898,41 @@ MONTHLY PRODUCTION (kWh)
             col_e1, col_e2, col_e3 = st.columns(3)
             with col_e1:
                 st.metric(
-                    "Kostnad – allt med pellets",
+                    "Cost – all pellets/fuel",
                     f"{ref_cost_all_pellets:,.0f} €"
                 )
             with col_e2:
                 st.metric(
-                    "Kostnad – sol + backup",
+                    "Cost – solar + backup",
                     f"{total_hybrid_cost:,.0f} €",
-                    delta=f"-{savings_vs_ref:,.0f} € besparing" if savings_vs_ref > 0 else None
+                    delta=f"-{savings_vs_ref:,.0f} € savings" if savings_vs_ref > 0 else None
                 )
             with col_e3:
                 st.metric(
-                    "Undvikt pelletskostnad (sol)",
+                    "Avoided fuel cost (solar)",
                     f"{(period_solar_kwh * pellets_price):,.0f} €"
                 )
 
             # ── Full summary table ────────────────────────────────
-            st.markdown("#### 📋 Sammanfattning torkningsanalys")
+            st.markdown("#### 📋 Drying Analysis Summary")
             summary_data = {
-                "Post": [
-                    "Totalt torkbehov",
-                    "  – Solvärme (direkt)",
-                    "  – Termiskt lager (extra)",
-                    "  – Elpatron (backup)",
-                    "  – Värmepump (backup)",
-                    "Täckningsgrad (sol + lager)",
-                    "Besparing vs pellets (solenergi)",
-                    "Backup-kostnad (el/VP)",
-                    "Nettobesparing",
+                "Item": [
+                    "Total drying demand",
+                    "  – Solar heat (direct)",
+                    "  – Thermal storage (extra)",
+                    "  – Electric heater (backup)",
+                    "  – Heat pump (backup)",
+                    "Coverage (solar + storage)",
+                    "Avoided fuel cost (solar energy)",
+                    "Backup operating cost (elec.)",
+                    "Net savings vs. reference fuel",
                 ],
-                "Värde": [
+                "Value": [
                     f"{total_drying_kwh:,.0f} kWh",
                     f"{period_solar_kwh:,.0f} kWh  ({solar_coverage_pct:.0f} %)",
                     f"{max(total_supplied_kwh - period_solar_kwh, 0):,.0f} kWh",
                     f"{el_kwh:,.0f} kWh" if use_el else "–",
-                    f"{hp_kwh:,.0f} kWh  (el: {hp_el:,.0f} kWh)" if use_hp else "–",
+                    f"{hp_kwh:,.0f} kWh  (elec: {hp_el:,.0f} kWh)" if use_hp else "–",
                     f"{storage_coverage:.1f} %",
                     f"{period_solar_kwh * pellets_price:,.0f} €",
                     f"{backup_cost:,.0f} €",
@@ -946,20 +946,20 @@ MONTHLY PRODUCTION (kWh)
             )
 
             # ── Monthly solar vs demand chart ─────────────────────
-            st.markdown("#### 📊 Månatlig solvärme vs torkningsbehov")
+            st.markdown("#### 📊 Monthly Solar Heat vs. Drying Demand")
             monthly_demand_kwh = total_drying_kwh / len(selected_months) \
                 if selected_months else 0
 
             chart_df = pd.DataFrame({
-                "Månad": selected_months,
-                "Solvärme [kWh]": [float(monthly_system_kwh[m]) for m in selected_months],
-                "Torkningsbehov [kWh]": [monthly_demand_kwh] * len(selected_months),
+                "Month": selected_months,
+                "Solar heat [kWh]": [float(monthly_system_kwh[m]) for m in selected_months],
+                "Drying demand [kWh]": [monthly_demand_kwh] * len(selected_months),
             })
-            st.bar_chart(chart_df.set_index("Månad"), color=["#F4A300", "#2196F3"])
+            st.bar_chart(chart_df.set_index("Month"), color=["#F4A300", "#2196F3"])
 
             st.caption(
-                "💡 **Tips:** Öka lagerkapaciteten för att utjämna dygnsvariation. "
-                "Kombinera med värmepump för lägst driftkostnad under molniga perioder."
+                "💡 **Tip:** Increase storage capacity to smooth out daily variation. "
+                "Combine with a heat pump for the lowest operating cost during cloudy periods."
             )
 
     st.markdown("---")
