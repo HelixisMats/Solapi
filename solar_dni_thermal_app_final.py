@@ -1049,8 +1049,9 @@ MONTHLY PRODUCTION (kWh)
                 use_el = st.checkbox("Enable", value=True, key="dry_use_el")
                 if use_el:
                     el_cap_kw = st.number_input("Thermal capacity [kW]", 10.0, 2000.0, 100.0, 10.0, key="dry_el_cap")
-                    el_op_h   = st.slider("Max hours/day", 1, 24, 8, key="dry_el_h")
+                    # No max-hours slider — boiler runs every hour below the price threshold
 
+                    # Spot price detection — try all sources
                     _spot_src = None
                     if st.session_state.get("drying_spot_df") is not None:
                         _spot_src = st.session_state["drying_spot_df"]
@@ -1070,21 +1071,22 @@ MONTHLY PRODUCTION (kWh)
                         _avg_ore = float(_spot_src["spotpris"].mean() * 100)
                         st.caption(f"✅ Spot prices loaded — avg {_avg_ore:.0f} öre/kWh")
                         el_threshold_ore = st.slider(
-                            "Run when spot < [öre/kWh]",
+                            "Run every hour when spot price < [öre/kWh]",
                             min_value=10, max_value=300, value=100, step=5,
                             key="dry_el_threshold",
-                            help="Boiler runs during hours with spot price below this level."
+                            help="The boiler runs at full capacity during every hour where the spot price is below this value."
                         )
                     else:
-                        st.caption("⚠️ Load spot prices in ⚡ Spot Prices tab")
-                        el_threshold_ore = 999
+                        st.warning("⚠️ No spot prices loaded — go to the **⚡ Spot Prices** tab and upload the CSV or fetch from ENTSO-E, then return here.")
+                        el_threshold_ore = 0   # don't run without prices
 
                     el_energy_tax_ore = st.number_input("Energy tax [öre/kWh]", 0.0, 100.0, 43.9, 0.1, key="dry_el_tax")
                     el_transfer_ore   = st.number_input("Transfer cost [öre/kWh]", 0.0, 100.0, 25.0, 0.5, key="dry_el_transfer")
                     el_w_pct = st.slider("→ Water tank [%]", 0, 100, 40, key="el_w_pct")
                     el_o_pct = 100 - el_w_pct
                     st.caption(f"→ Oil tank: {el_o_pct} %")
-                    el_day_kwh_max = el_cap_kw * el_op_h
+                    el_op_h = 24          # up to 24 eligible hours per day
+                    el_day_kwh_max = el_cap_kw * 24
                 else:
                     el_cap_kw = el_op_h = el_day_kwh_max = 0.0
                     el_threshold_ore = el_energy_tax_ore = el_transfer_ore = 0.0
@@ -1141,7 +1143,7 @@ MONTHLY PRODUCTION (kWh)
                         _best_day = _grp[_grp["_year"] == _grp["_year"].max()]
 
                     eligible = int((_best_day["_ore"] < el_threshold_ore).sum())
-                    eligible = min(eligible, el_op_h)
+                    # No hour cap — run every eligible hour in the day
                     daily_el_kwh_map[_md]   = el_cap_kw * eligible
                     daily_el_hours_map[_md] = eligible
                     _cheap = _best_day.loc[_best_day["_ore"] < el_threshold_ore, "_ore"]
