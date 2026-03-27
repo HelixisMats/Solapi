@@ -1108,20 +1108,43 @@ MONTHLY PRODUCTION (kWh)
                     daily_dates_list.append(date(2024, mo_idx, min(d + 1, DAYS_IN_MONTH[m])))
 
             # Per-day eligible hours for electric boiler
+            # Filter spot data to selected months only, use one representative year per day
             _spot_df_dry = st.session_state.get("drying_spot_df")
             daily_el_kwh_map   = {}
             daily_el_hours_map = {}
             daily_spot_ore_map = {}
+
             if use_el and _spot_df_dry is not None and len(_spot_df_dry) > 0:
                 _sdf = _spot_df_dry.copy()
-                _sdf["Tid"]  = pd.to_datetime(_sdf["Tid"])
-                _sdf["_md"]  = _sdf["Tid"].apply(lambda t: (t.month, t.day))
-                _sdf["_ore"] = _sdf["spotpris"] * 100
+                _sdf["Tid"]   = pd.to_datetime(_sdf["Tid"])
+                _sdf["_month_name"] = _sdf["Tid"].dt.month.map(
+                    {i+1: m for i, m in enumerate(MONTHS)}
+                )
+                _sdf["_year"] = _sdf["Tid"].dt.year
+                _sdf["_md"]   = _sdf["Tid"].apply(lambda t: (t.month, t.day))
+                _sdf["_ore"]  = _sdf["spotpris"] * 100
+
+                # Keep only the months we care about
+                selected_month_nums = [MONTHS.index(m) + 1 for m in selected_months]
+                _sdf = _sdf[_sdf["Tid"].dt.month.isin(selected_month_nums)]
+
+                # For each (month, day), pick the most recent year that has 24 hours of data
                 for _md, _grp in _sdf.groupby("_md"):
-                    eligible = int((_grp["_ore"] < el_threshold_ore).sum())
-                    daily_el_kwh_map[_md]   = el_cap_kw * min(eligible, el_op_h)
-                    daily_el_hours_map[_md] = min(eligible, el_op_h)
-                    _cheap = _grp.loc[_grp["_ore"] < el_threshold_ore, "_ore"]
+                    # Pick best year: most recent with full 24h coverage
+                    _best_day = None
+                    for _yr in sorted(_grp["_year"].unique(), reverse=True):
+                        _day_data = _grp[_grp["_year"] == _yr]
+                        if len(_day_data) >= 24:
+                            _best_day = _day_data
+                            break
+                    if _best_day is None:
+                        _best_day = _grp[_grp["_year"] == _grp["_year"].max()]
+
+                    eligible = int((_best_day["_ore"] < el_threshold_ore).sum())
+                    eligible = min(eligible, el_op_h)
+                    daily_el_kwh_map[_md]   = el_cap_kw * eligible
+                    daily_el_hours_map[_md] = eligible
+                    _cheap = _best_day.loc[_best_day["_ore"] < el_threshold_ore, "_ore"]
                     daily_spot_ore_map[_md] = float(_cheap.mean()) if len(_cheap) > 0 else 0.0
 
             # Day-by-day simulation
