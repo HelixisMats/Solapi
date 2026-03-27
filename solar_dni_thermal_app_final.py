@@ -202,15 +202,23 @@ def _load_preinstalled_spotprices(area: str, start_date, end_date, force_reload:
 
 
 def _ingest_spot_csv(uploaded_file) -> pd.DataFrame:
-    """Parse an uploaded spot price CSV (same format as spotpriser_2023_2026.csv)."""
+    """Parse an uploaded spot price CSV and return a clean Tid/spotpris frame."""
     df = pd.read_csv(uploaded_file, sep=',', decimal='.', parse_dates=['Tid'])
-    return df
-    spot_df.columns = ['Tid', 'spotpris']
-    spot_df = spot_df[
-        (spot_df['Tid'].dt.date >= start_date) &
-        (spot_df['Tid'].dt.date <= end_date)
-    ]
-    return spot_df if not spot_df.empty else None
+    # If already has a spotpris column, use it
+    if 'spotpris' in df.columns:
+        return df[['Tid', 'spotpris']].copy()
+    # Area-specific kr/kWh columns (e.g. SE4_kr_kwh)
+    kr_cols = [c for c in df.columns if c.endswith('_kr_kwh')]
+    if kr_cols:
+        # Prefer SE4, otherwise take first
+        col = next((c for c in kr_cols if 'SE4' in c), kr_cols[0])
+        return df[['Tid']].assign(spotpris=df[col]).copy()
+    # Area-specific öre/kWh columns
+    ore_cols = [c for c in df.columns if c.endswith('_ore_kwh')]
+    if ore_cols:
+        col = next((c for c in ore_cols if 'SE4' in c), ore_cols[0])
+        return df[['Tid']].assign(spotpris=df[col] / 100).copy()
+    raise ValueError(f"No recognised price column found. Columns: {list(df.columns)}")
 
 # -------------------------------------------------
 # Authentication
@@ -1051,7 +1059,7 @@ MONTHLY PRODUCTION (kWh)
                     el_cap_kw = st.number_input("Thermal capacity [kW]", 10.0, 2000.0, 100.0, 10.0, key="dry_el_cap")
                     # No max-hours slider — boiler runs every hour below the price threshold
 
-                    # Spot price detection — try all sources
+                    # Spot price detection — try all sources, handle both kr and ore columns
                     _spot_src = None
                     if st.session_state.get("drying_spot_df") is not None:
                         _spot_src = st.session_state["drying_spot_df"]
@@ -1060,12 +1068,19 @@ MONTHLY PRODUCTION (kWh)
                     else:
                         _full = st.session_state.get("spot_full_extended")
                         if _full is not None:
-                            _kr_cols = [c for c in _full.columns if c.endswith("_kr_kwh")]
+                            # Try kr_kwh columns first, fall back to ore_kwh/100
+                            _kr_cols  = [c for c in _full.columns if c.endswith("_kr_kwh")]
+                            _ore_cols = [c for c in _full.columns if c.endswith("_ore_kwh")]
                             if _kr_cols:
                                 _spot_src = _full[["Tid", _kr_cols[0]]].rename(
                                     columns={_kr_cols[0]: "spotpris"})
+                            elif _ore_cols:
+                                _tmp = _full[["Tid", _ore_cols[0]]].copy()
+                                _tmp["spotpris"] = _tmp[_ore_cols[0]] / 100
+                                _spot_src = _tmp[["Tid", "spotpris"]]
+                            elif "spotpris" in _full.columns:
+                                _spot_src = _full[["Tid", "spotpris"]]
                     _spot_loaded = _spot_src is not None and len(_spot_src) > 0
-
                     if _spot_loaded:
                         st.session_state["drying_spot_df"] = _spot_src
                         _avg_ore = float(_spot_src["spotpris"].mean() * 100)
@@ -1400,6 +1415,7 @@ MONTHLY PRODUCTION (kWh)
                 try:
                     raw_df = _ingest_spot_csv(uploaded_spot)
                     st.session_state['spot_full_extended'] = raw_df
+                    st.session_state['drying_spot_df']    = raw_df   # available immediately in Grain Drying tab
                     st.session_state.pop('spot_live_extended_to', None)
                     _add_spot_log(f"Uploaded CSV: {len(raw_df):,} rows, {raw_df['Tid'].min().date()} → {raw_df['Tid'].max().date()}")
                     st.success(
