@@ -1192,6 +1192,50 @@ MONTHLY PRODUCTION (kWh)
                 f"Combined usable storage: **{total_storage_kwh:,.0f} kWh** — "
                 f"≈ **{storage_days:.1f} days** of drying demand without any other source."
             )
+
+            # ── Physical tank sizing ──────────────────────────────
+            with st.expander("📐 Physical tank sizing — volume & dimensions", expanded=True):
+                st.caption(
+                    "Calculated from the energy capacity above. "
+                    "Adjust ΔT to match your actual operating range."
+                )
+                sz1, sz2 = st.columns(2)
+
+                with sz1:
+                    st.markdown("**💧 Water tank**")
+                    # E = ρ × V × c × ΔT  →  V = E / (ρ × c × ΔT)
+                    # c_water = 1.163 Wh/kg·°C, ρ = 1000 kg/m³
+                    w_dt = st.slider("Operating ΔT [°C]", 10, 60, 35,
+                                     key="w_delta_t",
+                                     help="Typical: charge at 90°C, discharge at 55°C → ΔT = 35°C")
+                    w_vol_m3 = w_cap / (1.163 * 1000 * w_dt / 1000) if w_dt > 0 else 0
+                    # Cylinder: assume H = 1.5 × D → V = π/4 × D² × 1.5D → D = (V × 4 / (1.5π))^(1/3)
+                    w_diam = (w_vol_m3 * 4 / (1.5 * math.pi)) ** (1/3) if w_vol_m3 > 0 else 0
+                    w_height = w_diam * 1.5
+                    w_mass_t = w_vol_m3 * 1.0  # tonnes of water
+                    wz1, wz2, wz3 = st.columns(3)
+                    wz1.metric("Volume", f"{w_vol_m3:.1f} m³")
+                    wz2.metric("Cylinder",
+                               f"⌀{w_diam:.1f} × {w_height:.1f} m",
+                               delta=f"H/D = 1.5")
+                    wz3.metric("Water mass", f"{w_mass_t:.0f} t")
+
+                with sz2:
+                    st.markdown("**🛢️ Oil tank**")
+                    # Thermal oil: c ≈ 0.53 Wh/kg·°C, ρ ≈ 900 kg/m³
+                    o_dt = st.slider("Operating ΔT [°C]", 20, 150, 80,
+                                     key="o_delta_t",
+                                     help="Typical: charge at 280°C, discharge at 200°C → ΔT = 80°C")
+                    o_vol_m3 = o_cap / (0.53 * 900 * o_dt / 1000) if o_dt > 0 else 0
+                    o_diam = (o_vol_m3 * 4 / (1.5 * math.pi)) ** (1/3) if o_vol_m3 > 0 else 0
+                    o_height = o_diam * 1.5
+                    o_mass_t = o_vol_m3 * 0.9
+                    oz1, oz2, oz3 = st.columns(3)
+                    oz1.metric("Volume", f"{o_vol_m3:.1f} m³")
+                    oz2.metric("Cylinder",
+                               f"⌀{o_diam:.1f} × {o_height:.1f} m",
+                               delta=f"H/D = 1.5")
+                    oz3.metric("Oil mass", f"{o_mass_t:.0f} t")
             st.markdown("---")
 
             # ════════════════════════════════════════════════════════════
