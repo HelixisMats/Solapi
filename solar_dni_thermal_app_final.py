@@ -382,6 +382,80 @@ def compute_thermal_outputs(
     )
 
 # -------------------------------------------------
+# PVGIS TMY DNI fetcher
+# -------------------------------------------------
+
+def parse_dms(coord_str: str):
+    """Parse coordinates: decimal '55.7 13.2' or DMS '55°42\\'31\"N 13°11\\'14\"E'"""
+    import re
+    s = coord_str.strip()
+    if '°' not in s:
+        parts = s.replace(',', ' ').split()
+        if len(parts) == 2:
+            return round(float(parts[0]), 6), round(float(parts[1]), 6)
+    s = re.sub(r'\s*([°\'"NSEW])\s*', r'\1', s)
+    m = re.match(r'''(\d+)°(\d+)'([\d.]+)"([NS])(\d+)°(\d+)'([\d.]+)"([EW])''', s)
+    if not m:
+        raise ValueError(f"Unrecognised coordinate format: {coord_str!r}  "
+                         "Use decimal: '55.7 13.2' or DMS: '55°42\\'31\"N 13°11\\'14\"E'")
+    lat = int(m[1]) + int(m[2]) / 60 + float(m[3]) / 3600
+    lon = int(m[5]) + int(m[6]) / 60 + float(m[7]) / 3600
+    if m[4] == 'S': lat = -lat
+    if m[8] == 'W': lon = -lon
+    return round(lat, 6), round(lon, 6)
+
+
+def fetch_pvgis_tmy_dni(lat: float, lon: float) -> tuple:
+    """
+    Fetch PVGIS TMY and return:
+      hour_matrix_wh : 24×12 DataFrame of avg DNI Wh/m² per hour per month
+      sum_daily_wh   : Series[month_name] avg daily DNI Wh/m²
+      meta           : dict
+    """
+    raddatabase = "PVGIS-SARAH2" if lat <= 62 else "ERA5"
+    params = {"lat": lat, "lon": lon, "outputformat": "json",
+              "raddatabase": raddatabase, "usehorizon": 1}
+    try:
+        resp = requests.get("https://re.jrc.ec.europa.eu/api/v5_2/tmy",
+                            params=params, timeout=60)
+    except Exception as e:
+        raise RuntimeError(f"Network error: {e}")
+
+    if not resp.ok:
+        try:
+            _msg = resp.json().get("message") or resp.text[:300]
+        except Exception:
+            _msg = resp.text[:300]
+        raise RuntimeError(f"PVGIS returned {resp.status_code}: {_msg}")
+
+    raw = resp.json()
+    if "outputs" not in raw or "tmy_hourly" not in raw.get("outputs", {}):
+        raise RuntimeError("PVGIS returned no TMY data for this location.")
+
+    rows = raw["outputs"]["tmy_hourly"]
+    df = pd.DataFrame(rows)
+    # time format: "0101:0000" → Jan 1 00:00
+    df["_month"] = df["time(UTC)"].str[:2].astype(int)
+    df["_hour"]  = df["time(UTC)"].str[5:7].astype(int)
+    df["dni"]    = pd.to_numeric(df["Gb(n)"], errors="coerce").fillna(0.0)
+
+    # 24×12 matrix: rows=hour(0-23), columns=month_name
+    pivot = df.groupby(["_month", "_hour"])["dni"].mean().unstack("_hour").T
+    month_names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+    pivot.columns = month_names
+    pivot.index = list(range(24))
+    hour_matrix_wh = pivot  # Wh/m² per hour average
+
+    sum_daily_wh = hour_matrix_wh.sum(axis=0)  # sum 24 hours = daily total Wh/m²
+
+    meta = {
+        "lat": lat, "lon": lon, "database": raddatabase,
+        "location": raw.get("inputs", {}).get("location", {})
+    }
+    return hour_matrix_wh, sum_daily_wh, meta
+
+
+# -------------------------------------------------
 # Streamlit App
 # -------------------------------------------------
 
@@ -401,10 +475,70 @@ st.sidebar.markdown("---")
 
 st.title("Helixis Solar Concentrator Thermal Production Estimate")
 
-uploaded = st.file_uploader(
-    "📥 Upload Excel file from GlobalSolarAtlas/Energydata.info",
-    type=["xlsx"]
-)
+# ── DNI data source ────────────────────────────────────────────────────────
+st.markdown("#### 📡 DNI Data Source")
+_src_pvgis, _src_excel = st.tabs(["🌍 Fetch from PVGIS (recommended)", "📂 Upload Global Solar Atlas Excel"])
+
+with _src_pvgis:
+    st.markdown(
+        "Enter the site coordinates and click **Fetch DNI**. "
+        "PVGIS provides a free Typical Meteorological Year with **hourly DNI** "
+        "for any location — no account or file needed."
+    )
+    _c1, _c2 = st.columns([2, 1])
+    with _c1:
+        _coord_input = st.text_input(
+            "Site coordinates",
+            value=st.session_state.get("pvgis_coord_input", "55.7 13.2"),
+            placeholder="55.7 13.2  or  55°42'31\"N 13°11'14\"E",
+            key="pvgis_coord_input",
+            help="Decimal: lat lon (space-separated). Or full DMS format."
+        )
+    with _c2:
+        st.markdown(" ")
+        _fetch_btn = st.button("🌐 Fetch DNI from PVGIS", type="primary", use_container_width=True)
+
+    if _fetch_btn:
+        try:
+            _lat, _lon = parse_dms(_coord_input)
+            st.caption(f"Parsed: lat={_lat}, lon={_lon}")
+            with st.spinner(f"Fetching TMY DNI from PVGIS for ({_lat}, {_lon})…"):
+                _hmwh, _sdwh, _meta = fetch_pvgis_tmy_dni(_lat, _lon)
+            st.session_state["pvgis_hour_matrix_wh"] = _hmwh
+            st.session_state["pvgis_sum_daily_wh"]   = _sdwh
+            st.session_state["pvgis_meta"]           = _meta
+            _ann_est = float(_sdwh.sum()) / 12 * 365 / 1000
+            st.success(
+                f"✅ PVGIS TMY loaded — **{_meta['database']}**  ·  "
+                f"Annual DNI ≈ **{_ann_est:.0f} kWh/m²/yr**"
+            )
+        except Exception as _e:
+            st.error(f"❌ {_e}")
+
+    if "pvgis_meta" in st.session_state:
+        _m = st.session_state["pvgis_meta"]
+        if _m.get("lat"):
+            st.caption(f"📍 lat={_m['lat']}, lon={_m['lon']}  ·  {_m['database']}")
+
+with _src_excel:
+    st.caption("Legacy — upload the Excel export from globalsolatatlas.info")
+    uploaded = st.file_uploader(
+        "📥 Upload Excel file from GlobalSolarAtlas",
+        type=["xlsx"], key="gsa_upload"
+    )
+    if uploaded is not None:
+        try:
+            _hmwh_gsa, _sdwh_gsa = parse_hourly_profiles(uploaded)
+            st.session_state["pvgis_hour_matrix_wh"] = _hmwh_gsa
+            st.session_state["pvgis_sum_daily_wh"]   = _sdwh_gsa
+            st.session_state["pvgis_meta"]           = {"lat": None, "lon": None, "database": "GlobalSolarAtlas"}
+            st.success("✅ Excel loaded.")
+        except Exception as _e:
+            st.error(f"❌ {_e}")
+
+# Use whichever source is loaded
+hour_matrix_wh = st.session_state.get("pvgis_hour_matrix_wh")
+sum_daily_wh   = st.session_state.get("pvgis_sum_daily_wh")
 
 with st.sidebar:
     st.header("⚙️ System Sizing Parameters")
@@ -420,8 +554,7 @@ with st.sidebar:
         ]
     )
 
-if uploaded is not None:
-    hour_matrix_wh, sum_daily_wh = parse_hourly_profiles(uploaded)
+if hour_matrix_wh is not None and sum_daily_wh is not None:
     monthly_kwh_m2, annual_kwh_m2 = compute_energy_from_profiles(sum_daily_wh)
 
     with st.sidebar:
@@ -1138,52 +1271,47 @@ MONTHLY PRODUCTION (kWh)
                     mo_idx = MONTHS.index(m) + 1
                     daily_dates_list.append(date(2024, mo_idx, min(d + 1, DAYS_IN_MONTH[m])))
 
-            # Per-day eligible hours for electric boiler
-            # Use full spot dataset — filtered to selected drying months, most recent year per day
-            daily_el_kwh_map   = {}
-            daily_el_hours_map = {}
-            daily_spot_ore_map = {}
+            # ── Electric boiler: count eligible hours per calendar day ──
+            # For every hour in the spot data where price < threshold → boiler runs at full capacity
+            daily_el_kwh_map   = {}   # (month, day) → kWh produced that day
+            daily_el_hours_map = {}   # (month, day) → hours boiler runs
 
-            if use_el:
-                # Pull from any available spot source (prefer full dataset)
-                _raw_full = st.session_state.get("spot_full_extended")
-                _spot_for_el = None
+            if use_el and el_threshold_ore > 0:
+                # Get the full hourly dataset
+                _raw = st.session_state.get("spot_full_extended")
+                _hourly = None
 
-                if _raw_full is not None:
-                    _raw_full = _raw_full.copy()
-                    _raw_full["Tid"] = pd.to_datetime(_raw_full["Tid"])
-                    # Find a price column — prefer SE4_kr_kwh, fall back to ore or spotpris
-                    _kr_cols  = [c for c in _raw_full.columns if c.endswith("_kr_kwh")]
-                    _ore_cols = [c for c in _raw_full.columns if c.endswith("_ore_kwh")]
-                    if _kr_cols:
-                        _col = next((c for c in _kr_cols if "SE4" in c), _kr_cols[0])
-                        _spot_for_el = _raw_full[["Tid"]].assign(spotpris=_raw_full[_col])
-                    elif _ore_cols:
-                        _col = next((c for c in _ore_cols if "SE4" in c), _ore_cols[0])
-                        _spot_for_el = _raw_full[["Tid"]].assign(spotpris=_raw_full[_col] / 100)
-                    elif "spotpris" in _raw_full.columns:
-                        _spot_for_el = _raw_full[["Tid", "spotpris"]]
+                if _raw is not None:
+                    _raw = _raw.copy()
+                    _raw["Tid"] = pd.to_datetime(_raw["Tid"])
+                    # Find price column — SE4 preferred
+                    for _c in [c for c in _raw.columns if "SE4" in c and "kr_kwh" in c]:
+                        _hourly = _raw[["Tid"]].assign(ore=(_raw[_c] * 100).round(2))
+                        break
+                    if _hourly is None:
+                        for _c in [c for c in _raw.columns if "SE4" in c and "ore_kwh" in c]:
+                            _hourly = _raw[["Tid"]].assign(ore=_raw[_c].round(2))
+                            break
+                    if _hourly is None and "spotpris" in _raw.columns:
+                        _hourly = _raw[["Tid"]].assign(ore=(_raw["spotpris"] * 100).round(2))
 
-                if _spot_for_el is None:
-                    # Fall back to any stored filtered source
-                    _fallback = (st.session_state.get("drying_spot_df") or
-                                 st.session_state.get("sp_loaded_df"))
-                    if _fallback is not None:
-                        _spot_for_el = _fallback.copy()
-                        _spot_for_el["Tid"] = pd.to_datetime(_spot_for_el["Tid"])
+                if _hourly is None:
+                    _fb = st.session_state.get("drying_spot_df") or st.session_state.get("sp_loaded_df")
+                    if _fb is not None:
+                        _fb = _fb.copy()
+                        _fb["Tid"] = pd.to_datetime(_fb["Tid"])
+                        _hourly = _fb[["Tid"]].assign(ore=(_fb["spotpris"] * 100).round(2))
 
-                if _spot_for_el is not None and len(_spot_for_el) > 0:
-                    _sdf = _spot_for_el.copy()
-                    _sdf["_year"] = _sdf["Tid"].dt.year
-                    _sdf["_md"]   = list(zip(_sdf["Tid"].dt.month, _sdf["Tid"].dt.day))
-                    _sdf["_ore"]  = (_sdf["spotpris"] * 100).round(2)
+                if _hourly is not None:
+                    # Filter to selected months only
+                    _sel_months_num = {MONTHS.index(m) + 1 for m in selected_months}
+                    _hourly = _hourly[_hourly["Tid"].dt.month.isin(_sel_months_num)]
 
-                    # Keep only selected drying months
-                    selected_month_nums = [MONTHS.index(m) + 1 for m in selected_months]
-                    _sdf = _sdf[_sdf["Tid"].dt.month.isin(selected_month_nums)]
+                    # For each calendar day (month, day), pick most recent year with ≥24 rows
+                    _hourly["_year"] = _hourly["Tid"].dt.year
+                    _hourly["_md"]   = list(zip(_hourly["Tid"].dt.month, _hourly["Tid"].dt.day))
 
-                    for _md, _grp in _sdf.groupby("_md"):
-                        # Pick most recent year with full 24 h of data
+                    for _md, _grp in _hourly.groupby("_md"):
                         _best = None
                         for _yr in sorted(_grp["_year"].unique(), reverse=True):
                             _day = _grp[_grp["_year"] == _yr]
@@ -1191,48 +1319,28 @@ MONTHLY PRODUCTION (kWh)
                                 _best = _day
                                 break
                         if _best is None:
-                            _best = _grp[_grp["_year"] == _grp["_year"].max()]
+                            _best = _grp
 
-                        eligible = int((_best["_ore"] < el_threshold_ore).sum())
+                        # Count every hour below threshold — no cap
+                        eligible = int((_best["ore"] < el_threshold_ore).sum())
                         daily_el_kwh_map[_md]   = el_cap_kw * eligible
                         daily_el_hours_map[_md] = eligible
-                        _cheap = _best.loc[_best["_ore"] < el_threshold_ore, "_ore"]
-                        daily_spot_ore_map[_md] = float(_cheap.mean()) if len(_cheap) > 0 else 0.0
 
-            # Day-by-day simulation
-            if use_el:
-                if daily_el_kwh_map:
-                    _total_eligible_h = sum(daily_el_hours_map.values())
-                    _total_el_days    = len(daily_el_kwh_map)
-                    st.caption(
-                        f"⚡ Boiler: spot data found for **{_total_el_days}** calendar days  ·  "
-                        f"eligible hours (< **{el_threshold_ore}** öre): **{_total_eligible_h} h**  ·  "
-                        f"max heat: **{_total_eligible_h * el_cap_kw / 1000:,.1f} MWh**"
-                    )
-                    with st.expander("🔍 Spot data debug (click to verify)"):
-                        _sample = sorted(daily_el_kwh_map.keys())[:3]
-                        for _k in _sample:
-                            st.caption(f"  Day {_k}: {daily_el_hours_map[_k]} h eligible → {daily_el_kwh_map[_k]:.0f} kWh")
-                        # Show actual öre value range from the data
-                        _sdf_check = st.session_state.get("spot_full_extended")
-                        if _sdf_check is not None:
-                            _ore_check = None
-                            _kr_c = [c for c in _sdf_check.columns if "SE4" in c and "kr_kwh" in c]
-                            _ore_c = [c for c in _sdf_check.columns if "SE4" in c and "ore_kwh" in c]
-                            if _kr_c:
-                                _ore_check = _sdf_check[_kr_c[0]] * 100
-                            elif _ore_c:
-                                _ore_check = _sdf_check[_ore_c[0]]
-                            if _ore_check is not None:
-                                st.caption(
-                                    f"  SE4 spot öre range (full CSV): "
-                                    f"{_ore_check.min():.1f} – {_ore_check.max():.1f} öre/kWh  ·  "
-                                    f"mean: {_ore_check.mean():.1f} öre/kWh"
-                                )
+                    if daily_el_kwh_map:
+                        _tot_h = sum(daily_el_hours_map.values())
+                        _tot_kwh = sum(daily_el_kwh_map.values())
+                        st.caption(
+                            f"⚡ **{n_lc24 and '' or ''}Electric boiler:** "
+                            f"**{_tot_h:,} hours** with spot < **{el_threshold_ore} öre/kWh** "
+                            f"→ max **{_tot_kwh/1000:,.1f} MWh** over the season "
+                            f"(**{el_cap_kw:.0f} kW** × {_tot_h:,} h)"
+                        )
+                    else:
+                        st.warning("⚠️ No hourly spot data matched the selected months. Check ⚡ Spot Prices tab.")
                 else:
                     st.warning(
-                        "⚠️ No spot price data found for the selected drying period. "
-                        "Make sure spot prices are loaded in the ⚡ Spot Prices tab and cover Aug–Sep."
+                        "⚠️ No spot price data found. "
+                        "Load spot prices in the ⚡ Spot Prices tab first."
                     )
             soc_w, soc_o = 0.0, 0.0
             sim = []
@@ -1241,7 +1349,7 @@ MONTHLY PRODUCTION (kWh)
                 if use_el and daily_el_kwh_map:
                     el_day_kwh   = daily_el_kwh_map.get(md_key, 0.0)
                     el_hours_day = daily_el_hours_map.get(md_key, 0)
-                    day_spot_ore = daily_spot_ore_map.get(md_key, 0.0)
+                    day_spot_ore = 0.0
                 elif use_el:
                     el_day_kwh = el_day_kwh_max; el_hours_day = el_op_h; day_spot_ore = 0.0
                 else:
@@ -1359,19 +1467,18 @@ MONTHLY PRODUCTION (kWh)
             el_days_total  = len(sim_df)
             el_days_active = int(sim_df["el_enabled"].sum()) if "el_enabled" in sim_df.columns else 0
             total_el_hours = int(sim_df["el_hours"].sum()) if "el_hours" in sim_df.columns else 0
-            _active_rows   = sim_df[sim_df["el_enabled"] == True]
-            avg_spot_ore   = float(_active_rows["spot_ore"].mean()) if len(_active_rows) > 0 else 0.0
+            # Use threshold as the upper-bound spot cost (actual cost ≤ threshold by definition)
+            avg_spot_ore   = el_threshold_ore * 0.7 if el_threshold_ore < 999 else 0.0  # rough midpoint
 
             if use_el and total_el_used > 0:
                 st.markdown("##### ⚡ Electric boiler — spot-price operation")
-                eb1, eb2, eb3 = st.columns(3)
-                eb1.metric("Eligible hours",
-                           f"{total_el_hours:,} h  ({el_days_active} days)",
-                           delta=f"spot < {el_threshold_ore} öre/kWh")
+                eb1, eb2 = st.columns(2)
+                eb1.metric("Hours run  (spot < threshold)",
+                           f"{total_el_hours:,} h  over {el_days_active} days",
+                           delta=f"threshold: {el_threshold_ore} öre/kWh")
                 eb2.metric("Heat produced",
-                           f"{total_el_used:,.0f} kWh",
+                           f"{total_el_used/1000:,.2f} MWh",
                            delta=f"{el_cap_kw:.0f} kW × {total_el_hours:,} h")
-                eb3.metric("Avg spot during operation", f"{avg_spot_ore:.0f} öre/kWh")
 
             st.markdown("---")
 
@@ -1917,4 +2024,4 @@ MONTHLY PRODUCTION (kWh)
                 pd.Timestamp.now().strftime("%Y-%m-%d %H:%M") + "*")
 
 else:
-    st.info("Upload a GSA Excel report file to continue.")
+    st.info("👆 Fetch DNI data from PVGIS above (enter coordinates + click Fetch), or upload a Global Solar Atlas Excel file.")
