@@ -1598,11 +1598,12 @@ MONTHLY PRODUCTION (kWh)
                 f"from the sidebar. Only physical spacing is configured here."
             )
 
-            n_per_string_max = max(1, n_units)
+            n_per_string_max     = max(1, n_units)
             n_per_string_default = min(4, n_per_string_max)
-            n_per_string = st.slider("Units per string (columns)", min_value=1,
-                                     max_value=n_per_string_max,
-                                     value=n_per_string_default)
+            n_per_string = st.number_input(
+                "Units per string (columns)", min_value=1,
+                max_value=n_per_string_max, value=n_per_string_default, step=1
+            )
 
             spacing_factor = st.slider("Row spacing factor", min_value=1.0, max_value=3.0,
                                        value=1.5, step=0.1, key="fl_spacing",
