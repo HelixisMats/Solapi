@@ -442,6 +442,7 @@ def fetch_pvgis_tmy_dni(lat: float, lon: float) -> tuple:
     df["_month"] = df["_dt"].dt.month
     df["_hour"]  = df["_dt"].dt.hour
     df["dni"]    = pd.to_numeric(df["Gb(n)"], errors="coerce").fillna(0.0)
+    df["t2m"]    = pd.to_numeric(df["T2m"],   errors="coerce").fillna(10.0)
 
     # 24×12 matrix: rows=hour(0-23), columns=month_name
     pivot = df.groupby(["_month", "_hour"])["dni"].mean().unstack(level=0)
@@ -453,11 +454,31 @@ def fetch_pvgis_tmy_dni(lat: float, lon: float) -> tuple:
 
     sum_daily_wh = hour_matrix_wh.sum(axis=0)
 
+    # Monthly average outdoor temperature (°C)
+    monthly_t2m = df.groupby("_month")["t2m"].mean()
+    monthly_t2m_dict = {month_names[m-1]: round(float(monthly_t2m.get(m, 10.0)), 1)
+                        for m in range(1, 13)}
+
     meta = {
         "lat": lat, "lon": lon, "database": raddatabase,
-        "location": raw.get("inputs", {}).get("location", {})
+        "location": raw.get("inputs", {}).get("location", {}),
+        "monthly_t2m": monthly_t2m_dict,
     }
     return hour_matrix_wh, sum_daily_wh, meta
+
+
+def cop_from_temp(t_outdoor_c: float, t_delivery_c: float = 60.0,
+                  efficiency: float = 0.45) -> float:
+    """
+    Estimate heat pump COP using Carnot efficiency:
+      COP = efficiency × T_hot / (T_hot - T_cold)
+    efficiency: fraction of ideal Carnot (typically 0.40–0.50 for air-source HP)
+    """
+    t_hot  = t_delivery_c + 273.15
+    t_cold = t_outdoor_c  + 273.15
+    if t_hot <= t_cold:
+        return 1.0
+    return round(efficiency * t_hot / (t_hot - t_cold), 2)
 
 
 # -------------------------------------------------
@@ -1192,7 +1213,51 @@ MONTHLY PRODUCTION (kWh)
                 st.markdown("**🔄 Heat pump**")
                 use_hp = st.checkbox("Enable", value=True, key="dry_use_hp")
                 if use_hp:
-                    cop       = st.number_input("COP", 1.0, 8.0, 3.5, 0.1, key="dry_hp_cop")
+                    # COP from outdoor temperature if PVGIS data available
+                    _pvgis_meta = st.session_state.get("pvgis_meta", {})
+                    _monthly_t  = _pvgis_meta.get("monthly_t2m", {})
+
+                    if _monthly_t and selected_months:
+                        # Delivery temperature slider
+                        t_delivery = st.slider(
+                            "Delivery temperature [°C]", 40, 90, 60, 5,
+                            key="hp_t_delivery",
+                            help="Heat pump output temperature to the tank."
+                        )
+                        hp_eff = st.slider(
+                            "HP efficiency factor [% of Carnot]", 30, 60, 45, 1,
+                            key="hp_carnot_eff",
+                            help="Typical air-source HP: 40–50%. Ground-source: 50–55%."
+                        ) / 100.0
+
+                        # Compute COP per selected month
+                        _month_cops = {}
+                        for _m in selected_months:
+                            _t = _monthly_t.get(_m, 10.0)
+                            _month_cops[_m] = cop_from_temp(_t, t_delivery, hp_eff)
+
+                        # Weighted average COP for simulation (equal weight per month)
+                        cop = round(sum(_month_cops.values()) / len(_month_cops), 2)
+
+                        # Display monthly COP table
+                        _cop_rows = {
+                            "Month": list(_month_cops.keys()),
+                            "Avg outdoor °C": [_monthly_t.get(m, 10.0) for m in _month_cops],
+                            "COP": [_month_cops[m] for m in _month_cops],
+                        }
+                        st.dataframe(pd.DataFrame(_cop_rows), hide_index=True,
+                                     use_container_width=True)
+                        st.caption(
+                            f"Weighted avg COP for simulation: **{cop:.2f}**  "
+                            f"(Carnot efficiency: {hp_eff*100:.0f}%, "
+                            f"delivery: {t_delivery}°C)"
+                        )
+                    else:
+                        # Fallback: manual COP if no temperature data
+                        if not _monthly_t:
+                            st.caption("💡 Fetch PVGIS data to get temperature-based COP")
+                        cop = st.number_input("COP (manual)", 1.0, 8.0, 3.5, 0.1,
+                                              key="dry_hp_cop")
                     hp_cap_kw = st.number_input("Thermal capacity [kW]", 10.0, 2000.0, 200.0, 10.0, key="dry_hp_cap")
                     hp_op_h   = st.slider("Operating hours/day", 1, 24, 16, key="dry_hp_h")
                     hp_w_pct  = st.slider("→ Water tank [%]", 0, 100, 80, key="hp_w_pct")
