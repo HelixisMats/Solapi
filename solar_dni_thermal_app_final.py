@@ -172,47 +172,60 @@ def _extend_spot_with_live_data(spot_df_full: pd.DataFrame) -> pd.DataFrame:
 
 
 def _load_preinstalled_spotprices(area: str, start_date, end_date, force_reload: bool = False):
-    """Load spot price data from session cache, then filter to area/dates."""
+    """Load spot price data from session cache, filter to area/dates."""
     full_cache_key = 'spot_full_extended'
     if force_reload:
         st.session_state.pop(full_cache_key, None)
 
     spot_df_full = st.session_state.get(full_cache_key)
     if spot_df_full is None:
-        # No data in cache — nothing to return; user must upload or fetch via ENTSO-E
         st.session_state['spot_load_error'] = (
             "No spot price data loaded yet. "
-            "Upload the `spotpriser_2023_2026.csv` file or fetch directly from ENTSO-E below."
+            "Upload the CSV file above first."
         )
         return None
 
-    st.session_state.pop('spot_load_error', None)
-    spot_df_full = _extend_spot_with_live_data(spot_df_full)
-    st.session_state[full_cache_key] = spot_df_full
+    # Ensure Tid is datetime
+    spot_df_full['Tid'] = pd.to_datetime(spot_df_full['Tid'])
 
+    # Find price column for requested area
     price_col = f"{area}_kr_kwh"
     if price_col not in spot_df_full.columns:
-        price_col_ore = f"{area}_ore_kwh"
-        if price_col_ore in spot_df_full.columns:
-            spot_df_full[price_col] = spot_df_full[price_col_ore] / 100
+        ore_col = f"{area}_ore_kwh"
+        if ore_col in spot_df_full.columns:
+            spot_df_full[price_col] = spot_df_full[ore_col] / 100
+            st.session_state[full_cache_key] = spot_df_full
         elif 'spotpris' in spot_df_full.columns:
-            # Plain two-column CSV — use as-is
             price_col = 'spotpris'
         else:
+            available = [c for c in spot_df_full.columns if c != 'Tid']
             st.session_state['spot_load_error'] = (
-                f"No price column found for {area}. "
-                f"Available columns: {[c for c in spot_df_full.columns if c != 'Tid']}"
+                f"No price data for {area}. Available columns: {available}"
             )
             return None
+
     if 'EUR_SEK' in spot_df_full.columns:
-        st.session_state['spot_eur_sek_rate'] = spot_df_full['EUR_SEK'].mean()
+        st.session_state['spot_eur_sek_rate'] = float(spot_df_full['EUR_SEK'].mean())
+
+    st.session_state.pop('spot_load_error', None)
+
     spot_df = spot_df_full[['Tid', price_col]].copy()
     spot_df.columns = ['Tid', 'spotpris']
     spot_df = spot_df[
         (spot_df['Tid'].dt.date >= start_date) &
         (spot_df['Tid'].dt.date <= end_date)
-    ]
-    return spot_df if not spot_df.empty else None
+    ].reset_index(drop=True)
+
+    if spot_df.empty:
+        data_min = spot_df_full['Tid'].min().date()
+        data_max = spot_df_full['Tid'].max().date()
+        st.session_state['spot_load_error'] = (
+            f"No data for {area} between {start_date} and {end_date}. "
+            f"CSV covers {data_min} → {data_max}."
+        )
+        return None
+
+    return spot_df
 
 
 def _ingest_spot_csv(uploaded_file) -> pd.DataFrame:
@@ -1481,23 +1494,35 @@ MONTHLY PRODUCTION (kWh)
             load_btn   = st.button("📊 Show prices", type="primary", key="sp_load_btn", use_container_width=True)
             reload_btn = st.button("🔄 Re-extend live", key="sp_reload_btn", use_container_width=True)
 
-        if load_btn or reload_btn:
-            with st.spinner(f"Preparing {sp_area} data…"):
-                sp_df = _load_preinstalled_spotprices(
-                    sp_area, sp_start, sp_end, force_reload=bool(reload_btn)
-                )
+        if load_btn:
+            with st.spinner(f"Loading {sp_area} data…"):
+                sp_df = _load_preinstalled_spotprices(sp_area, sp_start, sp_end)
             if sp_df is not None and not sp_df.empty:
                 st.session_state["sp_loaded_df"]   = sp_df
                 st.session_state["sp_loaded_area"] = sp_area
+                st.session_state.pop('spot_live_fetch_error', None)
             else:
                 err = st.session_state.get('spot_load_error', 'No data found for selected area/period.')
                 st.warning(f"⚠️ {err}")
 
-        # Live-fetch status
+        if reload_btn:
+            _cached_full = st.session_state.get('spot_full_extended')
+            if _cached_full is not None:
+                with st.spinner("Extending with live ENTSO-E data…"):
+                    extended = _extend_spot_with_live_data(_cached_full)
+                    st.session_state['spot_full_extended'] = extended
+                sp_df = _load_preinstalled_spotprices(sp_area, sp_start, sp_end)
+                if sp_df is not None and not sp_df.empty:
+                    st.session_state["sp_loaded_df"]   = sp_df
+                    st.session_state["sp_loaded_area"] = sp_area
+            else:
+                st.warning("Upload the CSV file first before re-extending.")
+
+        # Live-fetch status — only show if user explicitly tried re-extend
         _spot_err  = st.session_state.get('spot_live_fetch_error')
         _spot_last = st.session_state.get('spot_live_extended_to', '—')
-        if _spot_err:
-            st.warning(f"⚠️ Live-extension error: {_spot_err}  ·  Last successful: **{_spot_last}**")
+        if reload_btn and _spot_err:
+            st.warning(f"⚠️ Live-extension failed: {_spot_err}")
         elif _spot_last != '—':
             st.caption(f"Live data extended to: **{_spot_last}**")
 
