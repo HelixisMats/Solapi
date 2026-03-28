@@ -117,7 +117,14 @@ def _extend_spot_with_live_data(spot_df_full: pd.DataFrame) -> pd.DataFrame:
             fx_series[d] = last_rate
             d += timedelta(days=1)
     try:
-        from entsoe import EntsoePandasClient
+        try:
+            from entsoe import EntsoePandasClient
+        except ImportError:
+            st.session_state['spot_live_fetch_error'] = (
+                "entsoe-py not installed — live extension skipped. "
+                "CSV data will be used as-is."
+            )
+            return spot_df_full
         import pytz
         tz_se = pytz.timezone("Europe/Stockholm")
         client = EntsoePandasClient(api_key=ENTSOE_API_KEY)
@@ -188,7 +195,14 @@ def _load_preinstalled_spotprices(area: str, start_date, end_date, force_reload:
         price_col_ore = f"{area}_ore_kwh"
         if price_col_ore in spot_df_full.columns:
             spot_df_full[price_col] = spot_df_full[price_col_ore] / 100
+        elif 'spotpris' in spot_df_full.columns:
+            # Plain two-column CSV — use as-is
+            price_col = 'spotpris'
         else:
+            st.session_state['spot_load_error'] = (
+                f"No price column found for {area}. "
+                f"Available columns: {[c for c in spot_df_full.columns if c != 'Tid']}"
+            )
             return None
     if 'EUR_SEK' in spot_df_full.columns:
         st.session_state['spot_eur_sek_rate'] = spot_df_full['EUR_SEK'].mean()
@@ -202,23 +216,9 @@ def _load_preinstalled_spotprices(area: str, start_date, end_date, force_reload:
 
 
 def _ingest_spot_csv(uploaded_file) -> pd.DataFrame:
-    """Parse an uploaded spot price CSV and return a clean Tid/spotpris frame."""
+    """Parse an uploaded spot price CSV — return the full raw frame so all area columns are preserved."""
     df = pd.read_csv(uploaded_file, sep=',', decimal='.', parse_dates=['Tid'])
-    # If already has a spotpris column, use it
-    if 'spotpris' in df.columns:
-        return df[['Tid', 'spotpris']].copy()
-    # Area-specific kr/kWh columns (e.g. SE4_kr_kwh)
-    kr_cols = [c for c in df.columns if c.endswith('_kr_kwh')]
-    if kr_cols:
-        # Prefer SE4, otherwise take first
-        col = next((c for c in kr_cols if 'SE4' in c), kr_cols[0])
-        return df[['Tid']].assign(spotpris=df[col]).copy()
-    # Area-specific öre/kWh columns
-    ore_cols = [c for c in df.columns if c.endswith('_ore_kwh')]
-    if ore_cols:
-        col = next((c for c in ore_cols if 'SE4' in c), ore_cols[0])
-        return df[['Tid']].assign(spotpris=df[col] / 100).copy()
-    raise ValueError(f"No recognised price column found. Columns: {list(df.columns)}")
+    return df  # keep all original columns (SE4_kr_kwh, SE4_ore_kwh, EUR_SEK …)
 
 # -------------------------------------------------
 # Authentication
@@ -1415,7 +1415,8 @@ MONTHLY PRODUCTION (kWh)
                 try:
                     raw_df = _ingest_spot_csv(uploaded_spot)
                     st.session_state['spot_full_extended'] = raw_df
-                    st.session_state['drying_spot_df']    = raw_df   # available immediately in Grain Drying tab
+                    # drying_spot_df will be derived from spot_full_extended by the grain drying tab
+                    st.session_state.pop('drying_spot_df', None)
                     st.session_state.pop('spot_live_extended_to', None)
                     _add_spot_log(f"Uploaded CSV: {len(raw_df):,} rows, {raw_df['Tid'].min().date()} → {raw_df['Tid'].max().date()}")
                     st.success(
