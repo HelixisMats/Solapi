@@ -1520,9 +1520,9 @@ MONTHLY PRODUCTION (kWh)
             kc4.metric("EUR/SEK", f"{eur_sek:.2f}")
 
             st.markdown("##### Daily price gap (max − min per day)")
-            _pg  = sp_df_show.copy()
+            _pg  = sp_df_show.copy().reset_index(drop=True)
             _pg["_dp"] = prices_disp.values
-            _pg["Day"] = _pg["Tid"].dt.date
+            _pg["Day"] = pd.to_datetime(_pg["Tid"]).dt.date.astype(str)
             _ds  = _pg.groupby("Day")["_dp"].agg(["min","max"])
             _ds["gap"] = _ds["max"] - _ds["min"]
             st.line_chart(_ds["gap"].rename(f"Price gap [{currency}]"))
@@ -1532,9 +1532,9 @@ MONTHLY PRODUCTION (kWh)
             )
 
             st.markdown("##### Monthly average spot price")
-            _mo           = sp_df_show.copy()
+            _mo           = sp_df_show.copy().reset_index(drop=True)
             _mo["_dp"]    = prices_disp.values
-            _mo["Period"] = _mo["Tid"].dt.to_period("M").astype(str)
+            _mo["Period"] = pd.to_datetime(_mo["Tid"]).dt.to_period("M").astype(str)
             _ma           = _mo.groupby("Period")["_dp"].agg(["mean","min","max"]).reset_index()
             st.bar_chart(_ma.set_index("Period")["mean"].rename(f"Mean [{currency}]"))
 
