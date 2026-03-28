@@ -1234,14 +1234,39 @@ MONTHLY PRODUCTION (kWh)
                     _spot_loaded = _spot_src is not None and len(_spot_src) > 0
                     if _spot_loaded:
                         st.session_state["drying_spot_df"] = _spot_src
-                        _avg_ore = float(_spot_src["spotpris"].mean() * 100)
-                        _n_rows  = len(_spot_src)
-                        st.caption(f"✅ Spot prices loaded — {_n_rows:,} hours  ·  avg {_avg_ore:.0f} öre/kWh")
+                        _spot_src_ts = _spot_src.copy()
+                        _spot_src_ts["Tid"] = pd.to_datetime(_spot_src_ts["Tid"])
+                        _spot_src_ts["_ore"] = _spot_src_ts["spotpris"] * 100
+
+                        # Filter to selected months for live stats
+                        _sel_mnums = {MONTHS.index(m) + 1 for m in selected_months}
+                        _period_ore = _spot_src_ts[
+                            _spot_src_ts["Tid"].dt.month.isin(_sel_mnums)
+                        ]["_ore"]
+                        _total_h = len(_period_ore)
+                        _overall_avg = float(_spot_src_ts["_ore"].mean())
+
                         el_threshold_ore = st.slider(
                             "Run every hour when spot price < [öre/kWh]",
                             min_value=10, max_value=300, value=100, step=5,
                             key="dry_el_threshold",
-                            help="The boiler runs at full capacity during every hour where the spot price is below this value."
+                            help="The boiler runs at full capacity during EVERY hour "
+                                 "in the drying season where the spot price is BELOW this value. "
+                                 "Lower value = fewer hours (only very cheap). "
+                                 "Higher value = more hours (cheap + moderate)."
+                        )
+                        _elig_h = int((_period_ore < el_threshold_ore).sum())
+                        _elig_pct = _elig_h / _total_h * 100 if _total_h > 0 else 0
+                        _elig_avg = float(_period_ore[_period_ore < el_threshold_ore].mean()) \
+                                    if _elig_h > 0 else 0.0
+
+                        # Colour-code: green if < 40% of hours, orange if 40-70%, red if > 70%
+                        _icon = "🟢" if _elig_pct < 40 else ("🟡" if _elig_pct < 70 else "🔴")
+                        st.caption(
+                            f"✅ Spot prices loaded — dataset avg **{_overall_avg:.0f} öre/kWh**  \n"
+                            f"{_icon} **{_elig_h:,} h** out of {_total_h:,} h in {start_month}–{end_month} "
+                            f"have spot < **{el_threshold_ore} öre** ({_elig_pct:.0f}% of drying season)  \n"
+                            f"Avg price during those hours: **{_elig_avg:.0f} öre/kWh**"
                         )
                     else:
                         st.warning("⚠️ No spot prices loaded — go to the **⚡ Spot Prices** tab and upload the CSV or fetch from ENTSO-E, then return here.")
