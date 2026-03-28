@@ -434,19 +434,24 @@ def fetch_pvgis_tmy_dni(lat: float, lon: float) -> tuple:
 
     rows = raw["outputs"]["tmy_hourly"]
     df = pd.DataFrame(rows)
-    # time format: "0101:0000" → Jan 1 00:00
-    df["_month"] = df["time(UTC)"].str[:2].astype(int)
-    df["_hour"]  = df["time(UTC)"].str[5:7].astype(int)
+
+    # PVGIS TMY time format is "20050101:0010" (YYYYMMdd:HHmm) — parse properly
+    # Strip the colon and parse as datetime
+    _time_col = df["time(UTC)"].astype(str).str.replace(":", "", n=1)
+    df["_dt"]    = pd.to_datetime(_time_col, format="%Y%m%d%H%M", errors="coerce")
+    df["_month"] = df["_dt"].dt.month
+    df["_hour"]  = df["_dt"].dt.hour
     df["dni"]    = pd.to_numeric(df["Gb(n)"], errors="coerce").fillna(0.0)
 
     # 24×12 matrix: rows=hour(0-23), columns=month_name
-    pivot = df.groupby(["_month", "_hour"])["dni"].mean().unstack("_hour").T
+    pivot = df.groupby(["_month", "_hour"])["dni"].mean().unstack(level=0)
+    # pivot: index=_hour(0-23), columns=_month(1-12)
     month_names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
     pivot.columns = month_names
     pivot.index = list(range(24))
     hour_matrix_wh = pivot  # Wh/m² per hour average
 
-    sum_daily_wh = hour_matrix_wh.sum(axis=0)  # sum 24 hours = daily total Wh/m²
+    sum_daily_wh = hour_matrix_wh.sum(axis=0)
 
     meta = {
         "lat": lat, "lon": lon, "database": raddatabase,
