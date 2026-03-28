@@ -1097,7 +1097,8 @@ MONTHLY PRODUCTION (kWh)
                     if _spot_loaded:
                         st.session_state["drying_spot_df"] = _spot_src
                         _avg_ore = float(_spot_src["spotpris"].mean() * 100)
-                        st.caption(f"✅ Spot prices loaded — avg {_avg_ore:.0f} öre/kWh")
+                        _n_rows  = len(_spot_src)
+                        st.caption(f"✅ Spot prices loaded — {_n_rows:,} hours  ·  avg {_avg_ore:.0f} öre/kWh")
                         el_threshold_ore = st.slider(
                             "Run every hour when spot price < [öre/kWh]",
                             min_value=10, max_value=300, value=100, step=5,
@@ -1138,46 +1139,101 @@ MONTHLY PRODUCTION (kWh)
                     daily_dates_list.append(date(2024, mo_idx, min(d + 1, DAYS_IN_MONTH[m])))
 
             # Per-day eligible hours for electric boiler
-            # Filter spot data to selected months only, use one representative year per day
-            _spot_df_dry = st.session_state.get("drying_spot_df")
+            # Use full spot dataset — filtered to selected drying months, most recent year per day
             daily_el_kwh_map   = {}
             daily_el_hours_map = {}
             daily_spot_ore_map = {}
 
-            if use_el and _spot_df_dry is not None and len(_spot_df_dry) > 0:
-                _sdf = _spot_df_dry.copy()
-                _sdf["Tid"]   = pd.to_datetime(_sdf["Tid"])
-                _sdf["_month_name"] = _sdf["Tid"].dt.month.map(
-                    {i+1: m for i, m in enumerate(MONTHS)}
-                )
-                _sdf["_year"] = _sdf["Tid"].dt.year
-                _sdf["_md"]   = _sdf["Tid"].apply(lambda t: (t.month, t.day))
-                _sdf["_ore"]  = _sdf["spotpris"] * 100
+            if use_el:
+                # Pull from any available spot source (prefer full dataset)
+                _raw_full = st.session_state.get("spot_full_extended")
+                _spot_for_el = None
 
-                # Keep only the months we care about
-                selected_month_nums = [MONTHS.index(m) + 1 for m in selected_months]
-                _sdf = _sdf[_sdf["Tid"].dt.month.isin(selected_month_nums)]
+                if _raw_full is not None:
+                    _raw_full = _raw_full.copy()
+                    _raw_full["Tid"] = pd.to_datetime(_raw_full["Tid"])
+                    # Find a price column — prefer SE4_kr_kwh, fall back to ore or spotpris
+                    _kr_cols  = [c for c in _raw_full.columns if c.endswith("_kr_kwh")]
+                    _ore_cols = [c for c in _raw_full.columns if c.endswith("_ore_kwh")]
+                    if _kr_cols:
+                        _col = next((c for c in _kr_cols if "SE4" in c), _kr_cols[0])
+                        _spot_for_el = _raw_full[["Tid"]].assign(spotpris=_raw_full[_col])
+                    elif _ore_cols:
+                        _col = next((c for c in _ore_cols if "SE4" in c), _ore_cols[0])
+                        _spot_for_el = _raw_full[["Tid"]].assign(spotpris=_raw_full[_col] / 100)
+                    elif "spotpris" in _raw_full.columns:
+                        _spot_for_el = _raw_full[["Tid", "spotpris"]]
 
-                # For each (month, day), pick the most recent year that has 24 hours of data
-                for _md, _grp in _sdf.groupby("_md"):
-                    # Pick best year: most recent with full 24h coverage
-                    _best_day = None
-                    for _yr in sorted(_grp["_year"].unique(), reverse=True):
-                        _day_data = _grp[_grp["_year"] == _yr]
-                        if len(_day_data) >= 24:
-                            _best_day = _day_data
-                            break
-                    if _best_day is None:
-                        _best_day = _grp[_grp["_year"] == _grp["_year"].max()]
+                if _spot_for_el is None:
+                    # Fall back to any stored filtered source
+                    _fallback = (st.session_state.get("drying_spot_df") or
+                                 st.session_state.get("sp_loaded_df"))
+                    if _fallback is not None:
+                        _spot_for_el = _fallback.copy()
+                        _spot_for_el["Tid"] = pd.to_datetime(_spot_for_el["Tid"])
 
-                    eligible = int((_best_day["_ore"] < el_threshold_ore).sum())
-                    # No hour cap — run every eligible hour in the day
-                    daily_el_kwh_map[_md]   = el_cap_kw * eligible
-                    daily_el_hours_map[_md] = eligible
-                    _cheap = _best_day.loc[_best_day["_ore"] < el_threshold_ore, "_ore"]
-                    daily_spot_ore_map[_md] = float(_cheap.mean()) if len(_cheap) > 0 else 0.0
+                if _spot_for_el is not None and len(_spot_for_el) > 0:
+                    _sdf = _spot_for_el.copy()
+                    _sdf["_year"] = _sdf["Tid"].dt.year
+                    _sdf["_md"]   = list(zip(_sdf["Tid"].dt.month, _sdf["Tid"].dt.day))
+                    _sdf["_ore"]  = (_sdf["spotpris"] * 100).round(2)
+
+                    # Keep only selected drying months
+                    selected_month_nums = [MONTHS.index(m) + 1 for m in selected_months]
+                    _sdf = _sdf[_sdf["Tid"].dt.month.isin(selected_month_nums)]
+
+                    for _md, _grp in _sdf.groupby("_md"):
+                        # Pick most recent year with full 24 h of data
+                        _best = None
+                        for _yr in sorted(_grp["_year"].unique(), reverse=True):
+                            _day = _grp[_grp["_year"] == _yr]
+                            if len(_day) >= 24:
+                                _best = _day
+                                break
+                        if _best is None:
+                            _best = _grp[_grp["_year"] == _grp["_year"].max()]
+
+                        eligible = int((_best["_ore"] < el_threshold_ore).sum())
+                        daily_el_kwh_map[_md]   = el_cap_kw * eligible
+                        daily_el_hours_map[_md] = eligible
+                        _cheap = _best.loc[_best["_ore"] < el_threshold_ore, "_ore"]
+                        daily_spot_ore_map[_md] = float(_cheap.mean()) if len(_cheap) > 0 else 0.0
 
             # Day-by-day simulation
+            if use_el:
+                if daily_el_kwh_map:
+                    _total_eligible_h = sum(daily_el_hours_map.values())
+                    _total_el_days    = len(daily_el_kwh_map)
+                    st.caption(
+                        f"⚡ Boiler: spot data found for **{_total_el_days}** calendar days  ·  "
+                        f"eligible hours (< **{el_threshold_ore}** öre): **{_total_eligible_h} h**  ·  "
+                        f"max heat: **{_total_eligible_h * el_cap_kw / 1000:,.1f} MWh**"
+                    )
+                    with st.expander("🔍 Spot data debug (click to verify)"):
+                        _sample = sorted(daily_el_kwh_map.keys())[:3]
+                        for _k in _sample:
+                            st.caption(f"  Day {_k}: {daily_el_hours_map[_k]} h eligible → {daily_el_kwh_map[_k]:.0f} kWh")
+                        # Show actual öre value range from the data
+                        _sdf_check = st.session_state.get("spot_full_extended")
+                        if _sdf_check is not None:
+                            _ore_check = None
+                            _kr_c = [c for c in _sdf_check.columns if "SE4" in c and "kr_kwh" in c]
+                            _ore_c = [c for c in _sdf_check.columns if "SE4" in c and "ore_kwh" in c]
+                            if _kr_c:
+                                _ore_check = _sdf_check[_kr_c[0]] * 100
+                            elif _ore_c:
+                                _ore_check = _sdf_check[_ore_c[0]]
+                            if _ore_check is not None:
+                                st.caption(
+                                    f"  SE4 spot öre range (full CSV): "
+                                    f"{_ore_check.min():.1f} – {_ore_check.max():.1f} öre/kWh  ·  "
+                                    f"mean: {_ore_check.mean():.1f} öre/kWh"
+                                )
+                else:
+                    st.warning(
+                        "⚠️ No spot price data found for the selected drying period. "
+                        "Make sure spot prices are loaded in the ⚡ Spot Prices tab and cover Aug–Sep."
+                    )
             soc_w, soc_o = 0.0, 0.0
             sim = []
             for solar_day, sim_date in zip(daily_solar_list, daily_dates_list):
