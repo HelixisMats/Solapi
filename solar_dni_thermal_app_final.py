@@ -1544,24 +1544,42 @@ MONTHLY PRODUCTION (kWh)
             kc3.metric("Mean",    f"{prices_disp.mean():.3f} {currency}")
             kc4.metric("EUR/SEK", f"{eur_sek:.2f}")
 
+            import altair as alt
+
             st.markdown("##### Daily price gap (max − min per day)")
             _pg  = sp_df_show.copy().reset_index(drop=True)
-            _pg["_dp"] = prices_disp.values
-            _pg["Day"] = pd.to_datetime(_pg["Tid"]).dt.date.astype(str)
-            _ds  = _pg.groupby("Day")["_dp"].agg(["min","max"])
-            _ds["gap"] = _ds["max"] - _ds["min"]
-            st.line_chart(_ds["gap"].rename(f"Price gap [{currency}]"))
+            _pg["_dp"] = _pg["spotpris"].values * (1/eur_sek if show_eur else 1.0)
+            _pg["Day"] = pd.to_datetime(_pg["Tid"]).dt.date
+            _ds = _pg.groupby("Day")["_dp"].agg(["min","max"]).reset_index()
+            _ds["gap"] = (_ds["max"] - _ds["min"]).round(4)
+            _ds["Day"] = pd.to_datetime(_ds["Day"])
+            gap_chart = alt.Chart(_ds).mark_line(color="#2196F3").encode(
+                x=alt.X("Day:T", title="Date"),
+                y=alt.Y("gap:Q", title=f"Price gap [{currency}]"),
+                tooltip=[alt.Tooltip("Day:T", title="Date"),
+                         alt.Tooltip("gap:Q", title=f"Gap [{currency}]", format=".3f")]
+            ).properties(height=220)
+            st.altair_chart(gap_chart, use_container_width=True)
             st.caption(
                 f"Average daily price gap: **{_ds['gap'].mean():.3f} {currency}**  ·  "
-                f"Max gap: **{_ds['gap'].max():.3f} {currency}** on {_ds['gap'].idxmax()}"
+                f"Max gap: **{_ds['gap'].max():.3f} {currency}** on {_ds.loc[_ds['gap'].idxmax(), 'Day'].date()}"
             )
 
             st.markdown("##### Monthly average spot price")
-            _mo           = sp_df_show.copy().reset_index(drop=True)
-            _mo["_dp"]    = prices_disp.values
+            _mo = sp_df_show.copy().reset_index(drop=True)
+            _mo["_dp"]    = _mo["spotpris"].values * (1/eur_sek if show_eur else 1.0)
             _mo["Period"] = pd.to_datetime(_mo["Tid"]).dt.to_period("M").astype(str)
-            _ma           = _mo.groupby("Period")["_dp"].agg(["mean","min","max"]).reset_index()
-            st.bar_chart(_ma.set_index("Period")["mean"].rename(f"Mean [{currency}]"))
+            _ma = _mo.groupby("Period")["_dp"].agg(["mean","min","max"]).reset_index()
+            _ma.columns = ["Period", "mean", "min", "max"]
+            bar_chart = alt.Chart(_ma).mark_bar(color="#F4A300").encode(
+                x=alt.X("Period:O", title="Month", sort=None),
+                y=alt.Y("mean:Q", title=f"Mean [{currency}]"),
+                tooltip=[alt.Tooltip("Period:O", title="Month"),
+                         alt.Tooltip("mean:Q", title=f"Mean [{currency}]", format=".3f"),
+                         alt.Tooltip("min:Q",  title=f"Min [{currency}]",  format=".3f"),
+                         alt.Tooltip("max:Q",  title=f"Max [{currency}]",  format=".3f")]
+            ).properties(height=220)
+            st.altair_chart(bar_chart, use_container_width=True)
 
             with st.expander("📋 Monthly data table"):
                 _ma.columns = ["Period", f"Mean {currency}", f"Min {currency}", f"Max {currency}"]
