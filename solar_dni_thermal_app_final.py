@@ -1218,17 +1218,18 @@ MONTHLY PRODUCTION (kWh)
                     _monthly_t  = _pvgis_meta.get("monthly_t2m", {})
 
                     if _monthly_t and selected_months:
-                        # Delivery temperature slider
                         t_delivery = st.slider(
                             "Delivery temperature [°C]", 40, 90, 60, 5,
                             key="hp_t_delivery",
                             help="Heat pump output temperature to the tank."
                         )
-                        hp_eff = st.slider(
-                            "HP efficiency factor [% of Carnot]", 30, 60, 45, 1,
-                            key="hp_carnot_eff",
-                            help="Typical air-source HP: 40–50%. Ground-source: 50–55%."
-                        ) / 100.0
+                        hp_type = st.selectbox(
+                            "Heat pump type",
+                            ["Air-source", "Ground-source", "Water-source"],
+                            key="hp_type",
+                            help="Determines efficiency relative to ideal Carnot cycle."
+                        )
+                        hp_eff = {"Air-source": 0.43, "Ground-source": 0.52, "Water-source": 0.55}[hp_type]
 
                         # Compute COP per selected month
                         _month_cops = {}
