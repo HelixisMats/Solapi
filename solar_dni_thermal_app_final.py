@@ -117,14 +117,7 @@ def _extend_spot_with_live_data(spot_df_full: pd.DataFrame) -> pd.DataFrame:
             fx_series[d] = last_rate
             d += timedelta(days=1)
     try:
-        try:
-            from entsoe import EntsoePandasClient
-        except ImportError:
-            st.session_state['spot_live_fetch_error'] = (
-                "entsoe-py not installed — live extension skipped. "
-                "CSV data will be used as-is."
-            )
-            return spot_df_full
+        from entsoe import EntsoePandasClient
         import pytz
         tz_se = pytz.timezone("Europe/Stockholm")
         client = EntsoePandasClient(api_key=ENTSOE_API_KEY)
@@ -172,66 +165,52 @@ def _extend_spot_with_live_data(spot_df_full: pd.DataFrame) -> pd.DataFrame:
 
 
 def _load_preinstalled_spotprices(area: str, start_date, end_date, force_reload: bool = False):
-    """Load spot price data from session cache, filter to area/dates."""
+    """Load spot price data from session cache, then filter to area/dates."""
     full_cache_key = 'spot_full_extended'
     if force_reload:
         st.session_state.pop(full_cache_key, None)
 
     spot_df_full = st.session_state.get(full_cache_key)
     if spot_df_full is None:
+        # No data in cache — nothing to return; user must upload or fetch via ENTSO-E
         st.session_state['spot_load_error'] = (
             "No spot price data loaded yet. "
-            "Upload the CSV file above first."
+            "Upload the `spotpriser_2023_2026.csv` file or fetch directly from ENTSO-E below."
         )
         return None
 
-    # Ensure Tid is datetime
-    spot_df_full['Tid'] = pd.to_datetime(spot_df_full['Tid'])
+    st.session_state.pop('spot_load_error', None)
+    spot_df_full = _extend_spot_with_live_data(spot_df_full)
+    st.session_state[full_cache_key] = spot_df_full
 
-    # Find price column for requested area
     price_col = f"{area}_kr_kwh"
     if price_col not in spot_df_full.columns:
-        ore_col = f"{area}_ore_kwh"
-        if ore_col in spot_df_full.columns:
-            spot_df_full[price_col] = spot_df_full[ore_col] / 100
-            st.session_state[full_cache_key] = spot_df_full
-        elif 'spotpris' in spot_df_full.columns:
-            price_col = 'spotpris'
+        price_col_ore = f"{area}_ore_kwh"
+        if price_col_ore in spot_df_full.columns:
+            spot_df_full[price_col] = spot_df_full[price_col_ore] / 100
         else:
-            available = [c for c in spot_df_full.columns if c != 'Tid']
-            st.session_state['spot_load_error'] = (
-                f"No price data for {area}. Available columns: {available}"
-            )
             return None
-
     if 'EUR_SEK' in spot_df_full.columns:
-        st.session_state['spot_eur_sek_rate'] = float(spot_df_full['EUR_SEK'].mean())
-
-    st.session_state.pop('spot_load_error', None)
-
+        st.session_state['spot_eur_sek_rate'] = spot_df_full['EUR_SEK'].mean()
     spot_df = spot_df_full[['Tid', price_col]].copy()
     spot_df.columns = ['Tid', 'spotpris']
     spot_df = spot_df[
         (spot_df['Tid'].dt.date >= start_date) &
         (spot_df['Tid'].dt.date <= end_date)
-    ].reset_index(drop=True)
-
-    if spot_df.empty:
-        data_min = spot_df_full['Tid'].min().date()
-        data_max = spot_df_full['Tid'].max().date()
-        st.session_state['spot_load_error'] = (
-            f"No data for {area} between {start_date} and {end_date}. "
-            f"CSV covers {data_min} → {data_max}."
-        )
-        return None
-
-    return spot_df
+    ]
+    return spot_df if not spot_df.empty else None
 
 
 def _ingest_spot_csv(uploaded_file) -> pd.DataFrame:
-    """Parse an uploaded spot price CSV — return the full raw frame so all area columns are preserved."""
+    """Parse an uploaded spot price CSV (same format as spotpriser_2023_2026.csv)."""
     df = pd.read_csv(uploaded_file, sep=',', decimal='.', parse_dates=['Tid'])
-    return df  # keep all original columns (SE4_kr_kwh, SE4_ore_kwh, EUR_SEK …)
+    return df
+    spot_df.columns = ['Tid', 'spotpris']
+    spot_df = spot_df[
+        (spot_df['Tid'].dt.date >= start_date) &
+        (spot_df['Tid'].dt.date <= end_date)
+    ]
+    return spot_df if not spot_df.empty else None
 
 # -------------------------------------------------
 # Authentication
@@ -314,9 +293,9 @@ DAYS_IN_MONTH = {
 
 MONTHS = list(DAYS_IN_MONTH.keys())
 
-APERTURE_12 = 12.35
-APERTURE_24 = 24.7
-APERTURE_36 = 37.15
+# Active mirror (aperture) areas per concentrator model
+APERTURE_10 = 10.0   # LC10  (active mirror area 10 m²)
+APERTURE_20 = 20.0   # LC20  (active mirror area 20 m²)
 DESIGN_DNI_W_M2 = 1000.0
 
 # -------------------------------------------------
@@ -382,106 +361,6 @@ def compute_thermal_outputs(
     )
 
 # -------------------------------------------------
-# PVGIS TMY DNI fetcher
-# -------------------------------------------------
-
-def parse_dms(coord_str: str):
-    """Parse coordinates: decimal '55.7 13.2' or DMS '55°42\\'31\"N 13°11\\'14\"E'"""
-    import re
-    s = coord_str.strip()
-    if '°' not in s:
-        parts = s.replace(',', ' ').split()
-        if len(parts) == 2:
-            return round(float(parts[0]), 6), round(float(parts[1]), 6)
-    s = re.sub(r'\s*([°\'"NSEW])\s*', r'\1', s)
-    m = re.match(r'''(\d+)°(\d+)'([\d.]+)"([NS])(\d+)°(\d+)'([\d.]+)"([EW])''', s)
-    if not m:
-        raise ValueError(f"Unrecognised coordinate format: {coord_str!r}  "
-                         "Use decimal: '55.7 13.2' or DMS: '55°42\\'31\"N 13°11\\'14\"E'")
-    lat = int(m[1]) + int(m[2]) / 60 + float(m[3]) / 3600
-    lon = int(m[5]) + int(m[6]) / 60 + float(m[7]) / 3600
-    if m[4] == 'S': lat = -lat
-    if m[8] == 'W': lon = -lon
-    return round(lat, 6), round(lon, 6)
-
-
-def fetch_pvgis_tmy_dni(lat: float, lon: float) -> tuple:
-    """
-    Fetch PVGIS TMY and return:
-      hour_matrix_wh : 24×12 DataFrame of avg DNI Wh/m² per hour per month
-      sum_daily_wh   : Series[month_name] avg daily DNI Wh/m²
-      meta           : dict
-    """
-    raddatabase = "PVGIS-SARAH2" if lat <= 62 else "ERA5"
-    params = {"lat": lat, "lon": lon, "outputformat": "json",
-              "raddatabase": raddatabase, "usehorizon": 1}
-    try:
-        resp = requests.get("https://re.jrc.ec.europa.eu/api/v5_2/tmy",
-                            params=params, timeout=60)
-    except Exception as e:
-        raise RuntimeError(f"Network error: {e}")
-
-    if not resp.ok:
-        try:
-            _msg = resp.json().get("message") or resp.text[:300]
-        except Exception:
-            _msg = resp.text[:300]
-        raise RuntimeError(f"PVGIS returned {resp.status_code}: {_msg}")
-
-    raw = resp.json()
-    if "outputs" not in raw or "tmy_hourly" not in raw.get("outputs", {}):
-        raise RuntimeError("PVGIS returned no TMY data for this location.")
-
-    rows = raw["outputs"]["tmy_hourly"]
-    df = pd.DataFrame(rows)
-
-    # PVGIS TMY time format is "20050101:0010" (YYYYMMdd:HHmm) — parse properly
-    # Strip the colon and parse as datetime
-    _time_col = df["time(UTC)"].astype(str).str.replace(":", "", n=1)
-    df["_dt"]    = pd.to_datetime(_time_col, format="%Y%m%d%H%M", errors="coerce")
-    df["_month"] = df["_dt"].dt.month
-    df["_hour"]  = df["_dt"].dt.hour
-    df["dni"]    = pd.to_numeric(df["Gb(n)"], errors="coerce").fillna(0.0)
-    df["t2m"]    = pd.to_numeric(df["T2m"],   errors="coerce").fillna(10.0)
-
-    # 24×12 matrix: rows=hour(0-23), columns=month_name
-    pivot = df.groupby(["_month", "_hour"])["dni"].mean().unstack(level=0)
-    # pivot: index=_hour(0-23), columns=_month(1-12)
-    month_names = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-    pivot.columns = month_names
-    pivot.index = list(range(24))
-    hour_matrix_wh = pivot  # Wh/m² per hour average
-
-    sum_daily_wh = hour_matrix_wh.sum(axis=0)
-
-    # Monthly average outdoor temperature (°C)
-    monthly_t2m = df.groupby("_month")["t2m"].mean()
-    monthly_t2m_dict = {month_names[m-1]: round(float(monthly_t2m.get(m, 10.0)), 1)
-                        for m in range(1, 13)}
-
-    meta = {
-        "lat": lat, "lon": lon, "database": raddatabase,
-        "location": raw.get("inputs", {}).get("location", {}),
-        "monthly_t2m": monthly_t2m_dict,
-    }
-    return hour_matrix_wh, sum_daily_wh, meta
-
-
-def cop_from_temp(t_outdoor_c: float, t_delivery_c: float = 60.0,
-                  efficiency: float = 0.45) -> float:
-    """
-    Estimate heat pump COP using Carnot efficiency:
-      COP = efficiency × T_hot / (T_hot - T_cold)
-    efficiency: fraction of ideal Carnot (typically 0.40–0.50 for air-source HP)
-    """
-    t_hot  = t_delivery_c + 273.15
-    t_cold = t_outdoor_c  + 273.15
-    if t_hot <= t_cold:
-        return 1.0
-    return round(efficiency * t_hot / (t_hot - t_cold), 2)
-
-
-# -------------------------------------------------
 # Streamlit App
 # -------------------------------------------------
 
@@ -501,70 +380,10 @@ st.sidebar.markdown("---")
 
 st.title("Helixis Solar Concentrator Thermal Production Estimate")
 
-# ── DNI data source ────────────────────────────────────────────────────────
-st.markdown("#### 📡 DNI Data Source")
-_src_pvgis, _src_excel = st.tabs(["🌍 Fetch from PVGIS (recommended)", "📂 Upload Global Solar Atlas Excel"])
-
-with _src_pvgis:
-    st.markdown(
-        "Enter the site coordinates and click **Fetch DNI**. "
-        "PVGIS provides a free Typical Meteorological Year with **hourly DNI** "
-        "for any location — no account or file needed."
-    )
-    _c1, _c2 = st.columns([2, 1])
-    with _c1:
-        _coord_input = st.text_input(
-            "Site coordinates",
-            value=st.session_state.get("pvgis_coord_input", "55.7 13.2"),
-            placeholder="55.7 13.2  or  55°42'31\"N 13°11'14\"E",
-            key="pvgis_coord_input",
-            help="Decimal: lat lon (space-separated). Or full DMS format."
-        )
-    with _c2:
-        st.markdown(" ")
-        _fetch_btn = st.button("🌐 Fetch DNI from PVGIS", type="primary", use_container_width=True)
-
-    if _fetch_btn:
-        try:
-            _lat, _lon = parse_dms(_coord_input)
-            st.caption(f"Parsed: lat={_lat}, lon={_lon}")
-            with st.spinner(f"Fetching TMY DNI from PVGIS for ({_lat}, {_lon})…"):
-                _hmwh, _sdwh, _meta = fetch_pvgis_tmy_dni(_lat, _lon)
-            st.session_state["pvgis_hour_matrix_wh"] = _hmwh
-            st.session_state["pvgis_sum_daily_wh"]   = _sdwh
-            st.session_state["pvgis_meta"]           = _meta
-            _ann_est = float(_sdwh.sum()) / 12 * 365 / 1000
-            st.success(
-                f"✅ PVGIS TMY loaded — **{_meta['database']}**  ·  "
-                f"Annual DNI ≈ **{_ann_est:.0f} kWh/m²/yr**"
-            )
-        except Exception as _e:
-            st.error(f"❌ {_e}")
-
-    if "pvgis_meta" in st.session_state:
-        _m = st.session_state["pvgis_meta"]
-        if _m.get("lat"):
-            st.caption(f"📍 lat={_m['lat']}, lon={_m['lon']}  ·  {_m['database']}")
-
-with _src_excel:
-    st.caption("Legacy — upload the Excel export from globalsolatatlas.info")
-    uploaded = st.file_uploader(
-        "📥 Upload Excel file from GlobalSolarAtlas",
-        type=["xlsx"], key="gsa_upload"
-    )
-    if uploaded is not None:
-        try:
-            _hmwh_gsa, _sdwh_gsa = parse_hourly_profiles(uploaded)
-            st.session_state["pvgis_hour_matrix_wh"] = _hmwh_gsa
-            st.session_state["pvgis_sum_daily_wh"]   = _sdwh_gsa
-            st.session_state["pvgis_meta"]           = {"lat": None, "lon": None, "database": "GlobalSolarAtlas"}
-            st.success("✅ Excel loaded.")
-        except Exception as _e:
-            st.error(f"❌ {_e}")
-
-# Use whichever source is loaded
-hour_matrix_wh = st.session_state.get("pvgis_hour_matrix_wh")
-sum_daily_wh   = st.session_state.get("pvgis_sum_daily_wh")
+uploaded = st.file_uploader(
+    "📥 Upload Excel file from GlobalSolarAtlas/Energydata.info",
+    type=["xlsx"]
+)
 
 with st.sidebar:
     st.header("⚙️ System Sizing Parameters")
@@ -573,14 +392,14 @@ with st.sidebar:
         [
             "Peak thermal power (kW)",
             "Mirror surface (m²)",
-            "Number of 12 m² units",
-            "Number of 24 m² units",
-            "Number of 36 m² units",
+            "Number of LC10 units",
+            "Number of LC20 units",
             "Mix of units",
         ]
     )
 
-if hour_matrix_wh is not None and sum_daily_wh is not None:
+if uploaded is not None:
+    hour_matrix_wh, sum_daily_wh = parse_hourly_profiles(uploaded)
     monthly_kwh_m2, annual_kwh_m2 = compute_energy_from_profiles(sum_daily_wh)
 
     with st.sidebar:
@@ -595,43 +414,35 @@ if hour_matrix_wh is not None and sum_daily_wh is not None:
 
         st.subheader("Sizing Input")
 
-        n12 = 0
-        n24 = 0
-        n36 = 0
+        n10 = 0
+        n20 = 0
 
         if base_mode == "Peak thermal power (kW)":
             target_peak_kw = st.number_input("Target peak power [kW]", min_value=0.1, value=100.0)
             mirror_area = target_peak_kw / peak_kw_per_m2
 
         elif base_mode == "Mirror surface (m²)":
-            mirror_area = st.number_input("Mirror area [m²]", min_value=1.0, value=APERTURE_24)
+            mirror_area = st.number_input("Mirror area [m²]", min_value=1.0, value=APERTURE_20)
             target_peak_kw = mirror_area * peak_kw_per_m2
 
-        elif base_mode == "Number of 12 m² units":
-            n12 = st.number_input("Number of 12 m² units", min_value=0, value=1)
-            mirror_area = n12 * APERTURE_12
+        elif base_mode == "Number of LC10 units":
+            n10 = st.number_input("Number of LC10 units", min_value=0, value=1)
+            mirror_area = n10 * APERTURE_10
             target_peak_kw = mirror_area * peak_kw_per_m2
 
-        elif base_mode == "Number of 24 m² units":
-            n24 = st.number_input("Number of 24 m² units", min_value=0, value=1)
-            mirror_area = n24 * APERTURE_24
-            target_peak_kw = mirror_area * peak_kw_per_m2
-
-        elif base_mode == "Number of 36 m² units":
-            n36 = st.number_input("Number of 36 m² units", min_value=0, value=1)
-            mirror_area = n36 * APERTURE_36
+        elif base_mode == "Number of LC20 units":
+            n20 = st.number_input("Number of LC20 units", min_value=0, value=1)
+            mirror_area = n20 * APERTURE_20
             target_peak_kw = mirror_area * peak_kw_per_m2
 
         elif base_mode == "Mix of units":
-            n12 = st.number_input("Number of 12 m² units", min_value=0, value=0)
-            n24 = st.number_input("Number of 24 m² units", min_value=0, value=0)
-            n36 = st.number_input("Number of 36 m² units", min_value=0, value=1)
-            mirror_area = n12 * APERTURE_12 + n24 * APERTURE_24 + n36 * APERTURE_36
+            n10 = st.number_input("Number of LC10 units", min_value=0, value=0)
+            n20 = st.number_input("Number of LC20 units", min_value=0, value=1)
+            mirror_area = n10 * APERTURE_10 + n20 * APERTURE_20
             target_peak_kw = mirror_area * peak_kw_per_m2
 
-        needed_12_round = math.ceil(mirror_area / APERTURE_12)
-        needed_24_round = math.ceil(mirror_area / APERTURE_24)
-        needed_36_round = math.ceil(mirror_area / APERTURE_36)
+        needed_10_round = math.ceil(mirror_area / APERTURE_10)
+        needed_20_round = math.ceil(mirror_area / APERTURE_20)
 
         design_peak_kw = mirror_area * (DESIGN_DNI_W_M2 / 1000.0) * eta_opt
 
@@ -648,32 +459,23 @@ if hour_matrix_wh is not None and sum_daily_wh is not None:
         installation_cost = st.number_input("Estimated installation cost [€]", min_value=0.0, value=20000.0)
 
         # Calculate actual number of units based on sizing mode
-        if base_mode == "Number of 12 m² units":
-            actual_n12 = n12
-            actual_n24 = 0
-            actual_n36 = 0
-            total_units = n12
-        elif base_mode == "Number of 24 m² units":
-            actual_n12 = 0
-            actual_n24 = n24
-            actual_n36 = 0
-            total_units = n24
-        elif base_mode == "Number of 36 m² units":
-            actual_n12 = 0
-            actual_n24 = 0
-            actual_n36 = n36
-            total_units = n36
+        if base_mode == "Number of LC10 units":
+            actual_n10 = n10
+            actual_n20 = 0
+            total_units = n10
+        elif base_mode == "Number of LC20 units":
+            actual_n10 = 0
+            actual_n20 = n20
+            total_units = n20
         elif base_mode == "Mix of units":
-            actual_n12 = n12
-            actual_n24 = n24
-            actual_n36 = n36
-            total_units = n12 + n24 + n36
+            actual_n10 = n10
+            actual_n20 = n20
+            total_units = n10 + n20
         else:
-            # Peak power or Mirror surface → default to 36 m² units
-            actual_n12 = 0
-            actual_n24 = 0
-            actual_n36 = needed_36_round
-            total_units = needed_36_round
+            # Peak power or Mirror surface → default to LC20 units
+            actual_n10 = 0
+            actual_n20 = needed_20_round
+            total_units = needed_20_round
 
         total_product_cost = total_units * item_cost_per_unit
         system_cost = total_product_cost + installation_cost
@@ -766,12 +568,10 @@ if hour_matrix_wh is not None and sum_daily_wh is not None:
         
         with col1:
             unit_lines = f"            - Mirror area: {mirror_area:.2f} m²\n"
-            if actual_n12 > 0:
-                unit_lines += f"            - 12 m² units: {actual_n12} pcs\n"
-            if actual_n24 > 0:
-                unit_lines += f"            - 24 m² units: {actual_n24} pcs\n"
-            if actual_n36 > 0:
-                unit_lines += f"            - 36 m² units: {actual_n36} pcs\n"
+            if actual_n10 > 0:
+                unit_lines += f"            - LC10 units: {actual_n10} pcs\n"
+            if actual_n20 > 0:
+                unit_lines += f"            - LC20 units: {actual_n20} pcs\n"
             unit_lines += f"            - Peak thermal power @ 1000 W/m²: {design_peak_kw:.1f} kW"
             st.markdown(f"""
             **Mirror Configuration:**
@@ -947,9 +747,12 @@ if hour_matrix_wh is not None and sum_daily_wh is not None:
         
         pdf_bytes = generate_report(
             mirror_area=mirror_area,
-            n12=actual_n12,
-            n24=actual_n24,
-            n36=actual_n36,
+            # NOTE: report_generator.py still uses the old keyword names n12/n24/n36.
+            # LC10 count is passed as n12, LC20 count as n24, and the retired 36 m² slot as 0.
+            # Update report_generator.py to rename these (and its PDF labels) for full consistency.
+            n12=actual_n10,
+            n24=actual_n20,
+            n36=0,
             eta_opt_pct=eta_opt_pct,
             thermal_loss_pct=thermal_loss_pct,
             design_peak_kw=design_peak_kw,
@@ -1013,12 +816,10 @@ if hour_matrix_wh is not None and sum_daily_wh is not None:
         with col2:
             st.markdown("#### 📝 Text Summary")
             unit_text = ""
-            if actual_n12 > 0:
-                unit_text += f"12 m² units: {actual_n12}\n"
-            if actual_n24 > 0:
-                unit_text += f"24 m² units: {actual_n24}\n"
-            if actual_n36 > 0:
-                unit_text += f"36 m² units: {actual_n36}\n"
+            if actual_n10 > 0:
+                unit_text += f"LC10 units: {actual_n10}\n"
+            if actual_n20 > 0:
+                unit_text += f"LC20 units: {actual_n20}\n"
             summary_text = f"""
 HELIXIS SOLAR CONCENTRATOR - PRODUCTION ESTIMATE
 ================================================
@@ -1056,199 +857,174 @@ MONTHLY PRODUCTION (kWh)
             )
     
     # ========================================
-    # ========================================
-    # TAB 6: GRAIN DRYING — GAP-FILLING WORKFLOW
+    # TAB 6: TORKNING (GRAIN DRYING)
     # ========================================
 
     with tab6:
-        st.markdown("### 🌾 Grain Drying – System Design")
+        st.markdown("### 🌾 Grain Drying – Solar Heat Analysis")
         st.markdown(
-            "Design a complete heat supply system for grain drying. "
-            "Work through the five steps below to size solar, storage and backup "
-            "so that demand is reliably met across the full season."
+            "Calculate how solar heat, thermal storage and supplementary heat sources "
+            "can meet the drying energy demand during the harvest season."
         )
-        st.markdown("---")
 
-        # ════════════════════════════════════════════════════════════
-        # STEP 1 — DRYING DEMAND
-        # ════════════════════════════════════════════════════════════
-        st.markdown("#### 1️⃣  Define drying demand")
+        # ── Period selection ──────────────────────────────────────
+        st.markdown("#### 📅 Drying Period")
         MONTH_ORDER = list(DAYS_IN_MONTH.keys())
         col_p1, col_p2 = st.columns(2)
         with col_p1:
-            start_month = st.selectbox("Start month", MONTH_ORDER,
-                                        index=MONTH_ORDER.index("Aug"), key="dry_start")
+            start_month = st.selectbox(
+                "Start month", MONTH_ORDER,
+                index=MONTH_ORDER.index("Aug"),
+                key="dry_start"
+            )
         with col_p2:
-            end_month = st.selectbox("End month", MONTH_ORDER,
-                                      index=MONTH_ORDER.index("Sep"), key="dry_end")
+            end_month = st.selectbox(
+                "End month", MONTH_ORDER,
+                index=MONTH_ORDER.index("Sep"),
+                key="dry_end"
+            )
 
         start_idx = MONTH_ORDER.index(start_month)
         end_idx   = MONTH_ORDER.index(end_month)
         if end_idx < start_idx:
-            st.warning("⚠️ End month is before start month.")
+            st.warning("⚠️ End month is before start month – please swap them.")
             selected_months = []
         else:
             selected_months = MONTH_ORDER[start_idx : end_idx + 1]
             period_days = sum(DAYS_IN_MONTH[m] for m in selected_months)
+            st.info(
+                f"**Selected period:** {start_month} – {end_month} "
+                f"({len(selected_months)} months, {period_days} days)"
+            )
 
         if selected_months:
+            # ── Solar energy in period ───────────────────────────
+            period_solar_kwh = float(monthly_system_kwh[selected_months].sum())
+            period_daily_kwh = daily_system_kwh[selected_months]
+
+            # ── Drying demand ────────────────────────────────────
+            st.markdown("#### ⚡ Drying Energy Demand")
+            st.caption(
+                "Reference: a farm drying 10 000 tonnes/season typically requires ~1 MW "
+                "thermal over 6 weeks (Aug–Sep), consuming ~1 000 MWh of heat energy."
+            )
             col_d1, col_d2, col_d3 = st.columns(3)
             with col_d1:
-                grain_tonnes = st.number_input("Grain to dry [tonnes]",
-                                                min_value=0.1, value=10000.0, step=500.0, key="dry_tonnes")
+                grain_tonnes = st.number_input(
+                    "Grain to dry [tonnes]", min_value=0.1, value=10000.0, step=500.0,
+                    key="dry_tonnes"
+                )
             with col_d2:
-                mc_in  = st.number_input("Incoming moisture [%]",
-                                          min_value=1.0, max_value=40.0, value=20.0, step=0.5, key="dry_mc_in")
+                mc_in = st.number_input(
+                    "Incoming moisture content [%]", min_value=1.0, max_value=40.0,
+                    value=20.0, step=0.5, key="dry_mc_in"
+                )
             with col_d3:
-                mc_out = st.number_input("Target moisture [%]",
-                                          min_value=1.0, max_value=30.0, value=14.0, step=0.5, key="dry_mc_out")
+                mc_out = st.number_input(
+                    "Target moisture content [%]", min_value=1.0, max_value=30.0,
+                    value=14.0, step=0.5, key="dry_mc_out"
+                )
 
+            # Water to remove (wet basis)
             mc_in_f  = mc_in  / 100.0
             mc_out_f = mc_out / 100.0
             water_to_remove_kg = grain_tonnes * 1000.0 * (mc_in_f - mc_out_f) / (1.0 - mc_out_f)
+            # Specific energy for hot-air grain drying ≈ 1 430 kWh/ton water gives ~1 000 MWh for 10 000 t
             specific_energy_kwh_t = st.slider(
-                "Specific drying energy [kWh / tonne water removed]",
-                min_value=600, max_value=2000, value=1430, step=50, key="dry_specific",
-                help="Typically 800–1 500 kWh/t. Default ≈ 1 000 MWh for 10 000 t at 20→14 % MC."
+                "Specific drying energy [kWh / tonne of water removed]",
+                min_value=600, max_value=2000, value=1430, step=50,
+                key="dry_specific",
+                help="Typically 800–1 500 kWh/tonne of water removed. Default calibrated to ~1 000 MWh for 10 000 t at 20→14 % MC."
             )
-            total_drying_kwh  = (water_to_remove_kg / 1000.0) * specific_energy_kwh_t
-            daily_demand_kwh  = total_drying_kwh / period_days if period_days > 0 else 0
-            peak_drying_kw    = total_drying_kwh / (period_days * 18) if period_days > 0 else 0
+            total_drying_kwh = (water_to_remove_kg / 1000.0) * specific_energy_kwh_t
+            # Peak thermal power assuming uniform load over 6 weeks (42 days × 18 h/day)
+            peak_drying_kw = total_drying_kwh / (period_days * 18) if period_days > 0 else 0
 
-            d1, d2, d3, d4 = st.columns(4)
-            d1.metric("Season",           f"{start_month}–{end_month}  ({period_days} days)")
-            d2.metric("Water to remove",  f"{water_to_remove_kg/1000:.1f} t")
-            d3.metric("Total demand",     f"{total_drying_kwh/1000:,.1f} MWh")
-            d4.metric("Avg daily demand", f"{daily_demand_kwh:,.0f} kWh/day")
-            st.markdown("---")
+            col_r1, col_r2, col_r3, col_r4 = st.columns(4)
+            with col_r1:
+                st.metric("Water to remove", f"{water_to_remove_kg/1000:.1f} tonnes")
+            with col_r2:
+                st.metric("Total drying demand", f"{total_drying_kwh/1000:,.1f} MWh")
+            with col_r3:
+                st.metric("Avg. peak thermal load", f"{peak_drying_kw:,.0f} kW")
+            with col_r4:
+                solar_coverage_pct = min(period_solar_kwh / total_drying_kwh * 100, 100) \
+                    if total_drying_kwh > 0 else 0
+                st.metric("Solar heat covers", f"{solar_coverage_pct:.1f} %")
 
-            # ════════════════════════════════════════════════════════════
-            # STEP 2 — SOLAR CONCENTRATORS
-            # ════════════════════════════════════════════════════════════
-            st.markdown("#### 2️⃣  Size solar concentrators")
-            st.caption(
-                "Solar yield per LC24 unit is taken from the uploaded DNI file. "
-                "Adjust the slider to find the right solar fraction."
-            )
+            # ── LC20 unit sizing ─────────────────────────────────
+            st.markdown("#### 🔆 LC20 Unit Sizing")
+            # Energy-based: how many LC20 units to cover the full drying demand
+            kwh_per_lc20 = float(monthly_system_kwh[selected_months].sum() / max(mirror_area, 1)) * APERTURE_20 \
+                if mirror_area > 0 else 0
+            lc20_for_energy = math.ceil(total_drying_kwh / kwh_per_lc20) if kwh_per_lc20 > 0 else 0
+            # Peak-power-based: units to deliver the average peak thermal load
+            lc20_for_peak = math.ceil(peak_drying_kw / (APERTURE_20 * peak_kw_per_m2)) \
+                if peak_kw_per_m2 > 0 else 0
 
-            kwh_per_lc24 = float(monthly_system_kwh[selected_months].sum()) / max(mirror_area, 1) * APERTURE_24 \
-                           if mirror_area > 0 else 0
-            lc24_for_energy = math.ceil(total_drying_kwh / kwh_per_lc24) if kwh_per_lc24 > 0 else 0
-            lc24_for_peak   = math.ceil(peak_drying_kw / (APERTURE_24 * peak_kw_per_m2)) \
-                              if peak_kw_per_m2 > 0 else 0
-
-            n_lc24 = st.slider(
-                "Number of LC24 HW units for grain drying",
-                min_value=1, max_value=max(200, lc24_for_energy * 2),
-                value=lc24_for_peak, key="dry_n_lc24",
-                help=f"Energy-only cover: {lc24_for_energy} units  |  Peak-power cover: {lc24_for_peak} units"
-            )
-
-            scale_factor     = n_lc24 * APERTURE_24 / max(mirror_area, 1) if mirror_area > 0 else 0
-            period_solar_kwh = kwh_per_lc24 * n_lc24
-            solar_cover_pct  = min(period_solar_kwh / total_drying_kwh * 100, 100) if total_drying_kwh > 0 else 0
-            solar_gap_kwh    = max(total_drying_kwh - period_solar_kwh, 0)
-
-            s1, s2, s3, s4 = st.columns(4)
-            s1.metric("Solar units",          f"{n_lc24} × LC24 HW")
-            s2.metric("Seasonal solar yield", f"{period_solar_kwh/1000:,.1f} MWh")
-            s3.metric("Solar covers",         f"{solar_cover_pct:.0f} %  of demand")
-            s4.metric("Gap to fill",          f"{solar_gap_kwh/1000:,.1f} MWh",
-                       delta="by storage + backup" if solar_gap_kwh > 0 else "✅ solar alone sufficient")
-
-            if solar_cover_pct < 100:
-                st.info(
-                    f"☀️ {n_lc24} units supply **{solar_cover_pct:.0f} %** of demand. "
-                    f"The remaining **{solar_gap_kwh/1000:,.1f} MWh** comes from storage and backup heat."
+            col_lc1, col_lc2, col_lc3 = st.columns(3)
+            with col_lc1:
+                st.metric(
+                    "LC20 units – full energy cover",
+                    f"{lc20_for_energy} units",
+                    help="Number of LC20 units whose seasonal output equals the total drying demand."
                 )
-            st.markdown("---")
+            with col_lc2:
+                st.metric(
+                    "LC20 units – peak power cover",
+                    f"{lc20_for_peak} units",
+                    help="Number of LC20 units to deliver the average thermal peak load during daylight hours."
+                )
+            with col_lc3:
+                lc20_mirror_total = lc20_for_peak * APERTURE_20
+                st.metric(
+                    "Total mirror area (peak)",
+                    f"{lc20_mirror_total:,.0f} m²"
+                )
+            st.info(
+                f"💡 **Recommendation:** {lc20_for_peak} × LC20 units cover the ~{peak_drying_kw:,.0f} kW "
+                f"thermal peak load. Combined with thermal storage and a backup heater/heat pump, "
+                f"this can reliably supply the full {total_drying_kwh/1000:,.0f} MWh seasonal demand."
+            )
 
-            # ════════════════════════════════════════════════════════════
-            # STEP 3 — THERMAL STORAGE
-            # ════════════════════════════════════════════════════════════
-            st.markdown("#### 3️⃣  Size thermal storage")
-            st.caption(
-                "Storage bridges the gap between when solar / cheap electricity is available "
-                "and when the dryer runs. More storage = fewer deficit days."
+            daily_demand_kwh = total_drying_kwh / period_days if period_days > 0 else 0
+
+            # ── Dual thermal storage configuration ───────────────
+            st.markdown("#### 🛢️ Thermal Storage – Water & Oil Tanks")
+            st.markdown(
+                "Configure two storage media. Solar concentrators, heat pumps and electric "
+                "heaters each have a configurable split between the tanks. Discharge priority "
+                "is applied each day to meet the drying demand."
             )
 
             col_wh, col_oil = st.columns(2)
             with col_wh:
-                st.markdown("##### 💧 Water tank  *(60–95 °C)*")
-                w_cap  = st.number_input("Capacity [kWh]", min_value=0.0, value=500.0, step=50.0, key="w_cap")
-                w_eff  = st.slider("Round-trip efficiency [%]", 50, 99, 92, key="w_eff") / 100.0
-                w_prio = st.radio("Discharge priority", ["First (primary)", "Second (backup)"],
+                st.markdown("##### 💧 Water Tank  *(low-temp, 60–95 °C)*")
+                w_cap   = st.number_input("Capacity [kWh]",  min_value=0.0, value=500.0,  step=50.0,  key="w_cap")
+                w_eff   = st.slider("Round-trip efficiency [%]", 50, 99, 92, key="w_eff") / 100.0
+                w_prio  = st.radio("Discharge priority", ["First (primary)", "Second (backup)"],
                                    index=0, key="w_prio", horizontal=True)
             with col_oil:
-                st.markdown("##### 🛢️ Oil tank  *(100–300 °C)*")
-                o_cap = st.number_input("Capacity [kWh]", min_value=0.0, value=300.0, step=50.0, key="o_cap")
-                o_eff = st.slider("Round-trip efficiency [%]", 50, 99, 88, key="o_eff") / 100.0
-                st.caption("Discharge priority is opposite to water tank")
+                st.markdown("##### 🛢️ Thermal Oil Tank  *(high-temp, 100–300 °C)*")
+                o_cap   = st.number_input("Capacity [kWh]",  min_value=0.0, value=300.0,  step=50.0,  key="o_cap")
+                o_eff   = st.slider("Round-trip efficiency [%]", 50, 99, 88, key="o_eff") / 100.0
+                st.markdown("*(Discharge priority follows water tank setting)*")
 
-            water_first       = (w_prio == "First (primary)")
-            total_storage_kwh = (w_cap * w_eff) + (o_cap * o_eff)
-            storage_days      = total_storage_kwh / daily_demand_kwh if daily_demand_kwh > 0 else 0
-            st.caption(
-                f"Combined usable storage: **{total_storage_kwh:,.0f} kWh** — "
-                f"≈ **{storage_days:.1f} days** of drying demand without any other source."
+            water_first = (w_prio == "First (primary)")
+
+            # ── Heat sources ──────────────────────────────────────
+            st.markdown("#### 🔌 Heat Sources & Charging Split")
+            st.markdown(
+                "For each source, set the installed capacity and how the heat output is "
+                "split between the two tanks. Charging priority per day: "
+                "**Solar → Heat pump → Electric heater**."
             )
-
-            # ── Physical tank sizing ──────────────────────────────
-            with st.expander("📐 Physical tank sizing — volume & dimensions", expanded=True):
-                st.caption(
-                    "Calculated from the energy capacity above. "
-                    "Adjust ΔT to match your actual operating range."
-                )
-                sz1, sz2 = st.columns(2)
-
-                with sz1:
-                    st.markdown("**💧 Water tank**")
-                    # E = ρ × V × c × ΔT  →  V = E / (ρ × c × ΔT)
-                    # c_water = 1.163 Wh/kg·°C, ρ = 1000 kg/m³
-                    w_dt = st.slider("Operating ΔT [°C]", 10, 60, 35,
-                                     key="w_delta_t",
-                                     help="Typical: charge at 90°C, discharge at 55°C → ΔT = 35°C")
-                    w_vol_m3 = w_cap / (1.163 * 1000 * w_dt / 1000) if w_dt > 0 else 0
-                    # Cylinder: assume H = 1.5 × D → V = π/4 × D² × 1.5D → D = (V × 4 / (1.5π))^(1/3)
-                    w_diam = (w_vol_m3 * 4 / (1.5 * math.pi)) ** (1/3) if w_vol_m3 > 0 else 0
-                    w_height = w_diam * 1.5
-                    w_mass_t = w_vol_m3 * 1.0  # tonnes of water
-                    wz1, wz2, wz3 = st.columns(3)
-                    wz1.metric("Volume", f"{w_vol_m3:.1f} m³")
-                    wz2.metric("Cylinder",
-                               f"⌀{w_diam:.1f} × {w_height:.1f} m",
-                               delta=f"H/D = 1.5")
-                    wz3.metric("Water mass", f"{w_mass_t:.0f} t")
-
-                with sz2:
-                    st.markdown("**🛢️ Oil tank**")
-                    # Thermal oil: c ≈ 0.53 Wh/kg·°C, ρ ≈ 900 kg/m³
-                    o_dt = st.slider("Operating ΔT [°C]", 20, 150, 80,
-                                     key="o_delta_t",
-                                     help="Typical: charge at 280°C, discharge at 200°C → ΔT = 80°C")
-                    o_vol_m3 = o_cap / (0.53 * 900 * o_dt / 1000) if o_dt > 0 else 0
-                    o_diam = (o_vol_m3 * 4 / (1.5 * math.pi)) ** (1/3) if o_vol_m3 > 0 else 0
-                    o_height = o_diam * 1.5
-                    o_mass_t = o_vol_m3 * 0.9
-                    oz1, oz2, oz3 = st.columns(3)
-                    oz1.metric("Volume", f"{o_vol_m3:.1f} m³")
-                    oz2.metric("Cylinder",
-                               f"⌀{o_diam:.1f} × {o_height:.1f} m",
-                               delta=f"H/D = 1.5")
-                    oz3.metric("Oil mass", f"{o_mass_t:.0f} t")
-            st.markdown("---")
-
-            # ════════════════════════════════════════════════════════════
-            # STEP 4 — BACKUP HEAT SOURCES
-            # ════════════════════════════════════════════════════════════
-            st.markdown("#### 4️⃣  Configure backup heat sources")
-            st.caption("Charging priority: **☀️ Solar → 🔄 Heat pump → ⚡ Electric boiler**")
 
             col_src1, col_src2, col_src3 = st.columns(3)
 
             with col_src1:
                 st.markdown("**☀️ Solar concentrators**")
-                st.caption(f"{period_solar_kwh/period_days:,.0f} kWh/day avg  ·  {n_lc24} units")
+                st.caption(f"Available: {period_solar_kwh/period_days:,.0f} kWh/day (avg)")
                 sol_w_pct = st.slider("→ Water tank [%]", 0, 100, 60, key="sol_w_pct")
                 sol_o_pct = 100 - sol_w_pct
                 st.caption(f"→ Oil tank: {sol_o_pct} %")
@@ -1257,56 +1033,11 @@ MONTHLY PRODUCTION (kWh)
                 st.markdown("**🔄 Heat pump**")
                 use_hp = st.checkbox("Enable", value=True, key="dry_use_hp")
                 if use_hp:
-                    # COP from outdoor temperature if PVGIS data available
-                    _pvgis_meta = st.session_state.get("pvgis_meta", {})
-                    _monthly_t  = _pvgis_meta.get("monthly_t2m", {})
-
-                    if _monthly_t and selected_months:
-                        t_delivery = st.slider(
-                            "Delivery temperature [°C]", 40, 90, 60, 5,
-                            key="hp_t_delivery",
-                            help="Heat pump output temperature to the tank."
-                        )
-                        hp_type = st.selectbox(
-                            "Heat pump type",
-                            ["Air-source", "Ground-source", "Water-source"],
-                            key="hp_type",
-                            help="Determines efficiency relative to ideal Carnot cycle."
-                        )
-                        hp_eff = {"Air-source": 0.43, "Ground-source": 0.52, "Water-source": 0.55}[hp_type]
-
-                        # Compute COP per selected month
-                        _month_cops = {}
-                        for _m in selected_months:
-                            _t = _monthly_t.get(_m, 10.0)
-                            _month_cops[_m] = cop_from_temp(_t, t_delivery, hp_eff)
-
-                        # Weighted average COP for simulation (equal weight per month)
-                        cop = round(sum(_month_cops.values()) / len(_month_cops), 2)
-
-                        # Display monthly COP table
-                        _cop_rows = {
-                            "Month": list(_month_cops.keys()),
-                            "Avg outdoor °C": [_monthly_t.get(m, 10.0) for m in _month_cops],
-                            "COP": [_month_cops[m] for m in _month_cops],
-                        }
-                        st.dataframe(pd.DataFrame(_cop_rows), hide_index=True,
-                                     use_container_width=True)
-                        st.caption(
-                            f"Weighted avg COP for simulation: **{cop:.2f}**  "
-                            f"(Carnot efficiency: {hp_eff*100:.0f}%, "
-                            f"delivery: {t_delivery}°C)"
-                        )
-                    else:
-                        # Fallback: manual COP if no temperature data
-                        if not _monthly_t:
-                            st.caption("💡 Fetch PVGIS data to get temperature-based COP")
-                        cop = st.number_input("COP (manual)", 1.0, 8.0, 3.5, 0.1,
-                                              key="dry_hp_cop")
-                    hp_cap_kw = st.number_input("Thermal capacity [kW]", 10.0, 2000.0, 200.0, 10.0, key="dry_hp_cap")
-                    hp_op_h   = st.slider("Operating hours/day", 1, 24, 16, key="dry_hp_h")
-                    hp_w_pct  = st.slider("→ Water tank [%]", 0, 100, 80, key="hp_w_pct")
-                    hp_o_pct  = 100 - hp_w_pct
+                    cop        = st.number_input("COP", 1.0, 8.0, 3.5, 0.1, key="dry_hp_cop")
+                    hp_cap_kw  = st.number_input("Thermal capacity [kW]", 10.0, 2000.0, 200.0, 10.0, key="dry_hp_cap")
+                    hp_op_h    = st.slider("Operating hours/day", 1, 24, 16, key="dry_hp_h")
+                    hp_w_pct   = st.slider("→ Water tank [%]", 0, 100, 80, key="hp_w_pct")
+                    hp_o_pct   = 100 - hp_w_pct
                     st.caption(f"→ Oil tank: {hp_o_pct} %")
                     hp_day_kwh = hp_cap_kw * hp_op_h
                 else:
@@ -1314,192 +1045,101 @@ MONTHLY PRODUCTION (kWh)
                     hp_w_pct = hp_o_pct = 0
 
             with col_src3:
-                st.markdown("**⚡ Electric boiler**")
+                st.markdown("**⚡ Electric heater**")
                 use_el = st.checkbox("Enable", value=True, key="dry_use_el")
                 if use_el:
                     el_cap_kw = st.number_input("Thermal capacity [kW]", 10.0, 2000.0, 100.0, 10.0, key="dry_el_cap")
-                    # No max-hours slider — boiler runs every hour below the price threshold
+                    el_op_h   = st.slider("Max operating hours/day", 1, 24, 8, key="dry_el_h")
 
-                    # Spot price detection — try all sources, handle both kr and ore columns
-                    _spot_src = None
-                    if st.session_state.get("drying_spot_df") is not None:
-                        _spot_src = st.session_state["drying_spot_df"]
-                    elif st.session_state.get("sp_loaded_df") is not None:
-                        _spot_src = st.session_state["sp_loaded_df"]
-                    else:
-                        _full = st.session_state.get("spot_full_extended")
-                        if _full is not None:
-                            # Try kr_kwh columns first, fall back to ore_kwh/100
-                            _kr_cols  = [c for c in _full.columns if c.endswith("_kr_kwh")]
-                            _ore_cols = [c for c in _full.columns if c.endswith("_ore_kwh")]
-                            if _kr_cols:
-                                _spot_src = _full[["Tid", _kr_cols[0]]].rename(
-                                    columns={_kr_cols[0]: "spotpris"})
-                            elif _ore_cols:
-                                _tmp = _full[["Tid", _ore_cols[0]]].copy()
-                                _tmp["spotpris"] = _tmp[_ore_cols[0]] / 100
-                                _spot_src = _tmp[["Tid", "spotpris"]]
-                            elif "spotpris" in _full.columns:
-                                _spot_src = _full[["Tid", "spotpris"]]
-                    _spot_loaded = _spot_src is not None and len(_spot_src) > 0
+                    # ── Spot price detection: accept any loaded source ──
+                    _spot_src = (
+                        st.session_state.get("drying_spot_df") or
+                        st.session_state.get("sp_loaded_df") or
+                        (lambda df: df[["Tid", next(c for c in df.columns if c.endswith("_kr_kwh"))]]
+                            .rename(columns={next(c for c in df.columns if c.endswith("_kr_kwh")): "spotpris"})
+                            if df is not None and any(c.endswith("_kr_kwh") for c in df.columns) else None
+                        )(st.session_state.get("spot_full_extended"))
+                    )
+                    _spot_loaded = _spot_src is not None and not _spot_src.empty if hasattr(_spot_src, "empty") else False
+
                     if _spot_loaded:
+                        # Store for simulation use
                         st.session_state["drying_spot_df"] = _spot_src
-                        _spot_src_ts = _spot_src.copy()
-                        _spot_src_ts["Tid"] = pd.to_datetime(_spot_src_ts["Tid"])
-                        _spot_src_ts["_ore"] = _spot_src_ts["spotpris"] * 100
-
-                        # Filter to selected months for live stats
-                        _sel_mnums = {MONTHS.index(m) + 1 for m in selected_months}
-                        _period_ore = _spot_src_ts[
-                            _spot_src_ts["Tid"].dt.month.isin(_sel_mnums)
-                        ]["_ore"]
-                        _total_h = len(_period_ore)
-                        _overall_avg = float(_spot_src_ts["_ore"].mean())
-
+                        _avg_ore = float(_spot_src["spotpris"].mean() * 100)
+                        st.caption(f"✅ Spot prices loaded — avg {_avg_ore:.0f} öre/kWh")
                         el_threshold_ore = st.slider(
-                            "Run every hour when spot price < [öre/kWh]",
+                            "Run when spot price below [öre/kWh]",
                             min_value=10, max_value=300, value=100, step=5,
                             key="dry_el_threshold",
-                            help="The boiler runs at full capacity during EVERY hour "
-                                 "in the drying season where the spot price is BELOW this value. "
-                                 "Lower value = fewer hours (only very cheap). "
-                                 "Higher value = more hours (cheap + moderate)."
-                        )
-                        _elig_h = int((_period_ore < el_threshold_ore).sum())
-                        _elig_pct = _elig_h / _total_h * 100 if _total_h > 0 else 0
-                        _elig_avg = float(_period_ore[_period_ore < el_threshold_ore].mean()) \
-                                    if _elig_h > 0 else 0.0
-
-                        # Colour-code: green if < 40% of hours, orange if 40-70%, red if > 70%
-                        _icon = "🟢" if _elig_pct < 40 else ("🟡" if _elig_pct < 70 else "🔴")
-                        st.caption(
-                            f"✅ Spot prices loaded — dataset avg **{_overall_avg:.0f} öre/kWh**  \n"
-                            f"{_icon} **{_elig_h:,} h** out of {_total_h:,} h in {start_month}–{end_month} "
-                            f"have spot < **{el_threshold_ore} öre** ({_elig_pct:.0f}% of drying season)  \n"
-                            f"Avg price during those hours: **{_elig_avg:.0f} öre/kWh**"
+                            help="Electric heater only runs on days where the average spot price is below this threshold."
                         )
                     else:
-                        st.warning("⚠️ No spot prices loaded — go to the **⚡ Spot Prices** tab and upload the CSV or fetch from ENTSO-E, then return here.")
-                        el_threshold_ore = 0   # don't run without prices
+                        st.caption("⚠️ No spot prices loaded — load in ⚡ Spot Prices tab")
+                        el_threshold_ore = 999  # always run
 
-                    el_energy_tax_ore = st.number_input("Energy tax [öre/kWh]", 0.0, 100.0, 43.9, 0.1, key="dry_el_tax")
-                    el_transfer_ore   = st.number_input("Transfer cost [öre/kWh]", 0.0, 100.0, 25.0, 0.5, key="dry_el_transfer")
+                    el_energy_tax_ore = st.number_input(
+                        "Energy tax [öre/kWh]", 0.0, 100.0, 43.9, 0.1,
+                        key="dry_el_tax",
+                        help="Energiskatt — 43.9 öre/kWh (2024)"
+                    )
+                    el_transfer_ore = st.number_input(
+                        "Transfer cost [öre/kWh]", 0.0, 100.0, 25.0, 0.5,
+                        key="dry_el_transfer",
+                        help="Överföringskostnad — typical 20–50 öre/kWh"
+                    )
                     el_w_pct = st.slider("→ Water tank [%]", 0, 100, 40, key="el_w_pct")
                     el_o_pct = 100 - el_w_pct
                     st.caption(f"→ Oil tank: {el_o_pct} %")
-                    el_op_h = 24          # up to 24 eligible hours per day
-                    el_day_kwh_max = el_cap_kw * 24
+                    el_day_kwh_max = el_cap_kw * el_op_h
                 else:
                     el_cap_kw = el_op_h = el_day_kwh_max = 0.0
-                    el_threshold_ore = el_energy_tax_ore = el_transfer_ore = 0.0
+                    el_threshold_ore = 0
+                    el_energy_tax_ore = el_transfer_ore = 0.0
                     el_w_pct = el_o_pct = 0
 
-            st.markdown("---")
-
-            # ════════════════════════════════════════════════════════════
-            # STEP 5 — SIMULATION & GAP ANALYSIS
-            # ════════════════════════════════════════════════════════════
-            st.markdown("#### 5️⃣  Gap analysis")
-
-            # Build daily lists
+            # ── Day-by-day simulation ─────────────────────────────
             daily_solar_list = []
             daily_dates_list = []
             for m in selected_months:
-                sol_day = float(daily_system_kwh[m]) * scale_factor
+                sol_day = float(daily_system_kwh[m])
                 for d in range(DAYS_IN_MONTH[m]):
                     daily_solar_list.append(sol_day)
+                    # Build a representative date for spot price lookup
                     mo_idx = MONTHS.index(m) + 1
                     daily_dates_list.append(date(2024, mo_idx, min(d + 1, DAYS_IN_MONTH[m])))
 
-            # ── Electric boiler: count eligible hours per calendar day ──
-            # For every hour in the spot data where price < threshold → boiler runs at full capacity
-            daily_el_kwh_map   = {}   # (month, day) → kWh produced that day
-            daily_el_hours_map = {}   # (month, day) → hours boiler runs
+            # Build daily average spot price map (kr/kWh → öre/kWh)
+            _spot_df_dry = st.session_state.get("drying_spot_df")
+            daily_spot_ore_map = {}
+            if _spot_df_dry is not None and not _spot_df_dry.empty:
+                _sdf = _spot_df_dry.copy()
+                _sdf["_date"] = pd.to_datetime(_sdf["Tid"]).dt.date
+                # Use month+day only (year-agnostic match)
+                _sdf["_md"] = _sdf["_date"].apply(lambda d: (d.month, d.day))
+                _md_avg = _sdf.groupby("_md")["spotpris"].mean() * 100  # → öre/kWh
+                daily_spot_ore_map = _md_avg.to_dict()
 
-            if use_el and el_threshold_ore > 0:
-                # Get the full hourly dataset
-                _raw = st.session_state.get("spot_full_extended")
-                _hourly = None
-
-                if _raw is not None:
-                    _raw = _raw.copy()
-                    _raw["Tid"] = pd.to_datetime(_raw["Tid"])
-                    # Find price column — SE4 preferred
-                    for _c in [c for c in _raw.columns if "SE4" in c and "kr_kwh" in c]:
-                        _hourly = _raw[["Tid"]].assign(ore=(_raw[_c] * 100).round(2))
-                        break
-                    if _hourly is None:
-                        for _c in [c for c in _raw.columns if "SE4" in c and "ore_kwh" in c]:
-                            _hourly = _raw[["Tid"]].assign(ore=_raw[_c].round(2))
-                            break
-                    if _hourly is None and "spotpris" in _raw.columns:
-                        _hourly = _raw[["Tid"]].assign(ore=(_raw["spotpris"] * 100).round(2))
-
-                if _hourly is None:
-                    _fb = st.session_state.get("drying_spot_df") or st.session_state.get("sp_loaded_df")
-                    if _fb is not None:
-                        _fb = _fb.copy()
-                        _fb["Tid"] = pd.to_datetime(_fb["Tid"])
-                        _hourly = _fb[["Tid"]].assign(ore=(_fb["spotpris"] * 100).round(2))
-
-                if _hourly is not None:
-                    # Filter to selected months only
-                    _sel_months_num = {MONTHS.index(m) + 1 for m in selected_months}
-                    _hourly = _hourly[_hourly["Tid"].dt.month.isin(_sel_months_num)]
-
-                    # For each calendar day (month, day), pick most recent year with ≥24 rows
-                    _hourly["_year"] = _hourly["Tid"].dt.year
-                    _hourly["_md"]   = list(zip(_hourly["Tid"].dt.month, _hourly["Tid"].dt.day))
-
-                    for _md, _grp in _hourly.groupby("_md"):
-                        _best = None
-                        for _yr in sorted(_grp["_year"].unique(), reverse=True):
-                            _day = _grp[_grp["_year"] == _yr]
-                            if len(_day) >= 24:
-                                _best = _day
-                                break
-                        if _best is None:
-                            _best = _grp
-
-                        # Count every hour below threshold — no cap
-                        eligible = int((_best["ore"] < el_threshold_ore).sum())
-                        daily_el_kwh_map[_md]   = el_cap_kw * eligible
-                        daily_el_hours_map[_md] = eligible
-
-                    if daily_el_kwh_map:
-                        _tot_h = sum(daily_el_hours_map.values())
-                        _tot_kwh = sum(daily_el_kwh_map.values())
-                        st.caption(
-                            f"⚡ **{n_lc24 and '' or ''}Electric boiler:** "
-                            f"**{_tot_h:,} hours** with spot < **{el_threshold_ore} öre/kWh** "
-                            f"→ max **{_tot_kwh/1000:,.1f} MWh** over the season "
-                            f"(**{el_cap_kw:.0f} kW** × {_tot_h:,} h)"
-                        )
-                    else:
-                        st.warning("⚠️ No hourly spot data matched the selected months. Check ⚡ Spot Prices tab.")
-                else:
-                    st.warning(
-                        "⚠️ No spot price data found. "
-                        "Load spot prices in the ⚡ Spot Prices tab first."
-                    )
             soc_w, soc_o = 0.0, 0.0
-            sim = []
-            for solar_day, sim_date in zip(daily_solar_list, daily_dates_list):
-                md_key = (sim_date.month, sim_date.day)
-                if use_el and daily_el_kwh_map:
-                    el_day_kwh   = daily_el_kwh_map.get(md_key, 0.0)
-                    el_hours_day = daily_el_hours_map.get(md_key, 0)
-                    day_spot_ore = 0.0
-                elif use_el:
-                    el_day_kwh = el_day_kwh_max; el_hours_day = el_op_h; day_spot_ore = 0.0
-                else:
-                    el_day_kwh = el_hours_day = day_spot_ore = 0.0
+            sim = []   # one dict per day
 
-                row = dict(solar=0.0, hp=0.0, el=0.0, dis_w=0.0, dis_o=0.0, deficit=0.0,
-                           soc_w=0.0, soc_o=0.0, spot_ore=day_spot_ore,
-                           el_hours=el_hours_day, el_enabled=(el_day_kwh > 0))
+            for solar_day, sim_date in zip(daily_solar_list, daily_dates_list):
+                # Get spot price for this day (month, day)
+                md_key = (sim_date.month, sim_date.day)
+                day_spot_ore = daily_spot_ore_map.get(md_key, el_threshold_ore)  # fallback = threshold (always run)
+
+                # Electric heater runs only when spot < threshold
+                el_day_kwh = el_day_kwh_max if (use_el and day_spot_ore < el_threshold_ore) else 0.0
+
+                row = dict(
+                    solar=0.0, hp=0.0, el=0.0,
+                    dis_w=0.0, dis_o=0.0, deficit=0.0,
+                    soc_w=0.0, soc_o=0.0,
+                    spot_ore=day_spot_ore,
+                    el_enabled=(el_day_kwh > 0),
+                )
                 remaining_demand = daily_demand_kwh
 
+                # ── 1. CHARGING (priority: solar → HP → electric) ──
                 for src_kwh, w_frac, o_frac, src_key in [
                     (solar_day,                    sol_w_pct/100, sol_o_pct/100, "solar"),
                     (hp_day_kwh  if use_hp else 0, hp_w_pct/100,  hp_o_pct/100, "hp"),
@@ -1507,35 +1147,48 @@ MONTHLY PRODUCTION (kWh)
                 ]:
                     if src_kwh <= 0:
                         continue
+                    # Try to push directly to demand first, then overflow to tanks
                     direct = min(src_kwh, remaining_demand)
                     remaining_demand -= direct
                     row[src_key] += direct
+
                     leftover = src_kwh - direct
                     chg_w = min(leftover * w_frac, w_cap - soc_w)
                     chg_o = min(leftover * o_frac, o_cap - soc_o)
+                    # If split leaves unused capacity in one tank, spill to the other
                     spill = leftover - chg_w - chg_o
                     if spill > 0:
                         extra_w = min(spill, w_cap - soc_w - chg_w)
                         extra_o = min(spill - extra_w, o_cap - soc_o - chg_o)
-                        chg_w += extra_w; chg_o += extra_o
-                    soc_w += chg_w; soc_o += chg_o
-                    row[src_key] += chg_w + chg_o
+                        chg_w += extra_w
+                        chg_o += extra_o
+                    soc_w += chg_w
+                    soc_o += chg_o
+                    row[src_key] += chg_w + chg_o   # track total from this source
 
-                tanks = ([("w", soc_w, w_cap, w_eff), ("o", soc_o, o_cap, o_eff)] if water_first
-                         else [("o", soc_o, o_cap, o_eff), ("w", soc_w, w_cap, w_eff)])
+                # ── 2. DISCHARGE (priority order per user setting) ──
+                tanks = (
+                    [("w", soc_w, w_cap, w_eff), ("o", soc_o, o_cap, o_eff)]
+                    if water_first
+                    else [("o", soc_o, o_cap, o_eff), ("w", soc_w, w_cap, w_eff)]
+                )
                 for t_key, t_soc, t_cap, t_eff in tanks:
                     if remaining_demand <= 0:
                         break
-                    used = min(t_soc * t_eff, remaining_demand)
+                    avail = t_soc * t_eff
+                    used  = min(avail, remaining_demand)
                     drained = used / t_eff if t_eff > 0 else used
                     if t_key == "w":
-                        soc_w = max(soc_w - drained, 0); row["dis_w"] += used
+                        soc_w = max(soc_w - drained, 0)
+                        row["dis_w"] += used
                     else:
-                        soc_o = max(soc_o - drained, 0); row["dis_o"] += used
+                        soc_o = max(soc_o - drained, 0)
+                        row["dis_o"] += used
                     remaining_demand -= used
 
                 row["deficit"] = max(remaining_demand, 0)
-                row["soc_w"] = soc_w; row["soc_o"] = soc_o
+                row["soc_w"]   = soc_w
+                row["soc_o"]   = soc_o
                 sim.append(row)
 
             sim_df = pd.DataFrame(sim)
@@ -1548,164 +1201,154 @@ MONTHLY PRODUCTION (kWh)
             total_dis_w      = sim_df["dis_w"].sum()
             total_dis_o      = sim_df["dis_o"].sum()
             total_deficit    = sim_df["deficit"].sum()
-            coverage_pct     = min((total_drying_kwh - total_deficit) / total_drying_kwh * 100, 100) \
-                               if total_drying_kwh > 0 else 0
-            deficit_days     = int((sim_df["deficit"] > daily_demand_kwh * 0.05).sum())
+            total_supplied   = total_drying_kwh - total_deficit
+            coverage_pct     = min(total_supplied / total_drying_kwh * 100, 100) \
+                if total_drying_kwh > 0 else 0
 
-            # KPI row
-            k1, k2, k3, k4, k5 = st.columns(5)
-            k1.metric("✅ Coverage",         f"{coverage_pct:.1f} %")
-            k2.metric("☀️ Solar",            f"{total_solar_used/1000:,.1f} MWh",
-                       delta=f"{total_solar_used/total_drying_kwh*100:.0f} % of demand")
-            k3.metric("🔄 Heat pump",        f"{total_hp_used/1000:,.1f} MWh" if use_hp else "–")
-            k4.metric("⚡ Electric boiler",  f"{total_el_used/1000:,.1f} MWh" if use_el else "–")
-            k5.metric("⚠️ Deficit",          f"{deficit_days} days  /  {total_deficit/1000:,.1f} MWh",
-                       delta="✅ None" if deficit_days == 0 else "Increase storage or backup capacity")
+            # ── KPI row ───────────────────────────────────────────
+            st.markdown("#### 📊 Simulation Results")
+            kc = st.columns(5)
+            kc[0].metric("Overall coverage",       f"{coverage_pct:.1f} %")
+            kc[1].metric("Solar used",             f"{total_solar_used/1000:,.1f} MWh")
+            kc[2].metric("Heat pump used",         f"{total_hp_used/1000:,.1f} MWh")
+            kc[3].metric("Electric heater used",   f"{total_el_used/1000:,.1f} MWh")
+            kc[4].metric("Unmet deficit",          f"{total_deficit/1000:,.1f} MWh")
 
-            if coverage_pct < 95:
-                st.warning(
-                    f"⚠️ Coverage **{coverage_pct:.1f} %** — {deficit_days} days unmet. "
-                    "Increase solar units, storage capacity, or raise the boiler spot threshold."
-                )
-            else:
-                st.success(f"✅ Full season covered at **{coverage_pct:.1f} %**.")
+            kc2 = st.columns(4)
+            kc2[0].metric("Water tank discharge",  f"{total_dis_w/1000:,.1f} MWh")
+            kc2[1].metric("Oil tank discharge",    f"{total_dis_o/1000:,.1f} MWh")
+            kc2[2].metric("Days with deficit",     f"{(sim_df['deficit']>5).sum()} days")
+            kc2[3].metric("Max water SOC reached", f"{sim_df['soc_w'].max()/w_cap*100:.0f} %" if w_cap>0 else "–")
 
-            # Supply stack vs demand chart
-            st.markdown("##### Daily supply stack vs. demand")
-            st.caption(
-                "Stacked bars = heat from each source each day. "
-                "Red (deficit) = days the stack falls short of demand."
-            )
-            supply_chart = pd.DataFrame({
-                "☀️ Solar":           sim_df["solar"].clip(upper=daily_demand_kwh),
-                "💧 Water tank":      sim_df["dis_w"],
-                "🛢️ Oil tank":        sim_df["dis_o"],
-                "🔄 Heat pump":       sim_df["hp"].clip(upper=daily_demand_kwh),
-                "⚡ Electric boiler": sim_df["el"].clip(upper=daily_demand_kwh),
-                "⚠️ Deficit":         sim_df["deficit"],
-            }, index=sim_df.index)
-            st.bar_chart(supply_chart,
-                         color=["#F4A300","#2196F3","#FF8C00","#4CAF50","#E91E63","#EF5350"])
-            st.caption(
-                f"Daily demand line = **{daily_demand_kwh:,.0f} kWh/day**  ·  "
-                f"Solar surplus spilled (tanks full): "
-                f"**{max(period_solar_kwh - total_solar_used, 0)/1000:,.1f} MWh**"
-            )
-
-            # Storage SOC
-            st.markdown("##### Storage state of charge")
-            st.line_chart(pd.DataFrame({
+            # ── SOC chart ─────────────────────────────────────────
+            st.markdown("##### Storage State of Charge – daily evolution")
+            soc_chart = pd.DataFrame({
                 "Water tank [kWh]": sim_df["soc_w"],
                 "Oil tank [kWh]":   sim_df["soc_o"],
-            }, index=sim_df.index), color=["#2196F3","#FF8C00"])
-            st.caption(
-                f"Max water SOC: **{sim_df['soc_w'].max():,.0f} / {w_cap:.0f} kWh**  ·  "
-                f"Max oil SOC: **{sim_df['soc_o'].max():,.0f} / {o_cap:.0f} kWh**"
-            )
+            })
+            st.line_chart(soc_chart, color=["#2196F3", "#F4A300"])
 
-            # Electric boiler operating summary
-            el_days_total  = len(sim_df)
-            el_days_active = int(sim_df["el_enabled"].sum()) if "el_enabled" in sim_df.columns else 0
-            total_el_hours = int(sim_df["el_hours"].sum()) if "el_hours" in sim_df.columns else 0
-            # Use threshold as the upper-bound spot cost (actual cost ≤ threshold by definition)
-            avg_spot_ore   = el_threshold_ore * 0.7 if el_threshold_ore < 999 else 0.0  # rough midpoint
+            # ── Daily energy-flow chart ───────────────────────────
+            st.markdown("##### Daily energy flows [kWh]")
+            flow_chart = pd.DataFrame({
+                "Solar direct":        sim_df["solar"].clip(upper=daily_demand_kwh),
+                "Water tank out":      sim_df["dis_w"],
+                "Oil tank out":        sim_df["dis_o"],
+                "Heat pump":           sim_df["hp"].clip(upper=daily_demand_kwh),
+                "Electric heater":     sim_df["el"].clip(upper=daily_demand_kwh),
+            })
+            st.bar_chart(flow_chart, color=["#F4A300","#2196F3","#FF8C00","#4CAF50","#E91E63"])
 
-            if use_el and total_el_used > 0:
-                st.markdown("##### ⚡ Electric boiler — spot-price operation")
-                eb1, eb2 = st.columns(2)
-                eb1.metric("Hours run  (spot < threshold)",
-                           f"{total_el_hours:,} h  over {el_days_active} days",
-                           delta=f"threshold: {el_threshold_ore} öre/kWh")
-                eb2.metric("Heat produced",
-                           f"{total_el_used/1000:,.2f} MWh",
-                           delta=f"{el_cap_kw:.0f} kW × {total_el_hours:,} h")
-
-            st.markdown("---")
-
-            # ════════════════════════════════════════════════════════════
-            # STEP 6 — ECONOMICS
-            # ════════════════════════════════════════════════════════════
-            st.markdown("#### 6️⃣  Economics")
-
+            # ── Economics ─────────────────────────────────────────
+            st.markdown("#### 💰 Economic Comparison")
             pellets_price = st.number_input(
-                "Reference fuel price [€/kWh]  (pellets / fuel oil)",
-                min_value=0.01, value=0.08, step=0.01, key="dry_pellets"
+                "Reference price pellets / fuel oil [€/kWh]", min_value=0.01, value=0.08,
+                step=0.01, key="dry_pellets"
             )
             ref_cost = total_drying_kwh * pellets_price
 
-            hp_el_kwh   = total_hp_used / cop if (use_hp and cop > 0) else 0.0
-            _hp_spot    = st.session_state.get("drying_spot_df")
-            hp_spot_eur = float(_hp_spot["spotpris"].mean()) if _hp_spot is not None else 0.10
-            hp_cost     = hp_el_kwh * hp_spot_eur
+            hp_el_kwh = total_hp_used / cop if (use_hp and cop > 0) else 0.0
+            # HP electricity price: use spot average if available, else energy tax + transfer only
+            _hp_spot_src = st.session_state.get("drying_spot_df")
+            hp_spot_eur = float(_hp_spot_src["spotpris"].mean()) if _hp_spot_src is not None else 0.10
+            hp_cost = hp_el_kwh * hp_spot_eur
 
+            # Electric heater cost: weighted actual spot + fixed tax + transfer
             if use_el and total_el_used > 0:
-                el_spot_cost     = total_el_used * avg_spot_ore / 100
-                el_tax_cost      = total_el_used * el_energy_tax_ore / 100
-                el_trans_cost    = total_el_used * el_transfer_ore / 100
-                el_total_cost    = el_spot_cost + el_tax_cost + el_trans_cost
+                # Weighted average spot price over days heater ran
+                _el_rows = sim_df[sim_df["el_enabled"] == True] if "el_enabled" in sim_df.columns else sim_df
+                avg_spot_ore = _el_rows["spot_ore"].mean() if len(_el_rows) > 0 else el_threshold_ore
+                el_spot_cost  = total_el_used * avg_spot_ore / 100       # spot energy cost
+                el_tax_cost   = total_el_used * el_energy_tax_ore / 100  # energiskatt
+                el_trans_cost = total_el_used * el_transfer_ore / 100    # överföring
+                el_total_cost = el_spot_cost + el_tax_cost + el_trans_cost
                 el_avg_total_ore = avg_spot_ore + el_energy_tax_ore + el_transfer_ore
             else:
                 el_spot_cost = el_tax_cost = el_trans_cost = el_total_cost = 0.0
+                avg_spot_ore = 0.0
                 el_avg_total_ore = 0.0
 
-            backup_cost  = hp_cost + el_total_cost
-            savings      = ref_cost - backup_cost
-            total_supplied = total_drying_kwh - total_deficit
+            backup_cost = hp_cost + el_total_cost
+            savings     = ref_cost - backup_cost
 
-            ec1, ec2, ec3, ec4 = st.columns(4)
-            ec1.metric("Reference (all fuel)",  f"{ref_cost:,.0f} €",
-                       delta=f"@ {pellets_price:.2f} €/kWh")
-            ec2.metric("Backup operating cost", f"{backup_cost:,.0f} €",
-                       delta=f"savings {savings:,.0f} €" if savings >= 0 else f"overshoot {-savings:,.0f} €",
-                       delta_color="normal" if savings >= 0 else "inverse")
-            ec3.metric("Solar avoided fuel",
-                       f"{total_solar_used * pellets_price:,.0f} €",
-                       delta=f"{total_solar_used/1000:,.1f} MWh × {pellets_price:.2f} €")
-            ec4.metric("Cost / MWh delivered",
-                       f"{backup_cost / max(total_supplied/1000, 0.001):,.1f} €/MWh")
+            # How many days did the heater actually run?
+            el_days_active = int(sim_df["el_enabled"].sum()) if "el_enabled" in sim_df.columns else 0
+            el_days_total  = len(sim_df)
 
-            with st.expander("📋 Full cost breakdown"):
-                st.dataframe(pd.DataFrame({
-                    "Item": [
-                        "Total drying demand",
-                        "  ☀️ Solar contribution",
-                        "  🔄 Heat pump",
-                        "  ⚡ Electric boiler",
-                        "  💧 Water tank discharge",
-                        "  🛢️ Oil tank discharge",
-                        "Unmet deficit",
-                        "Season coverage",
-                        "—",
-                        "Reference cost (all fuel)",
-                        "  ⚡ Boiler – spot electricity",
-                        "  ⚡ Boiler – energy tax",
-                        "  ⚡ Boiler – transfer cost",
-                        "  ⚡ Boiler – total",
-                        "  🔄 Heat pump electricity",
-                        "Total backup cost",
-                        "Net savings vs. reference",
-                    ],
-                    "Value": [
-                        f"{total_drying_kwh/1000:,.1f} MWh",
-                        f"{total_solar_used/1000:,.1f} MWh  ({total_solar_used/total_drying_kwh*100:.0f} %)" if total_drying_kwh > 0 else "–",
-                        f"{total_hp_used/1000:,.1f} MWh" if use_hp else "–",
-                        f"{total_el_used/1000:,.1f} MWh  ({el_days_active} days, {total_el_hours} h)" if use_el else "–",
-                        f"{total_dis_w/1000:,.1f} MWh",
-                        f"{total_dis_o/1000:,.1f} MWh",
-                        f"{total_deficit/1000:,.1f} MWh  ({deficit_days} days)" if total_deficit > 0 else "None ✅",
-                        f"{coverage_pct:.1f} %",
-                        "",
-                        f"{ref_cost:,.0f} €",
-                        f"{el_spot_cost:,.0f} €  (avg {avg_spot_ore:.0f} öre/kWh)" if use_el else "–",
-                        f"{el_tax_cost:,.0f} €  ({el_energy_tax_ore:.1f} öre/kWh)" if use_el else "–",
-                        f"{el_trans_cost:,.0f} €  ({el_transfer_ore:.1f} öre/kWh)" if use_el else "–",
-                        f"{el_total_cost:,.0f} €  ({el_avg_total_ore:.0f} öre/kWh all-in)" if use_el else "–",
-                        f"{hp_cost:,.0f} €  ({hp_spot_eur*100:.0f} öre/kWh avg spot)" if use_hp else "–",
-                        f"{backup_cost:,.0f} €",
-                        f"{savings:,.0f} €",
-                    ]
-                }), use_container_width=True, hide_index=True)
+            col_e1, col_e2, col_e3, col_e4 = st.columns(4)
+            col_e1.metric("Cost – all pellets/fuel",   f"{ref_cost:,.0f} €")
+            col_e2.metric("Backup operating cost",     f"{backup_cost:,.0f} €",
+                          delta=f"-{savings:,.0f} € vs pellets" if savings > 0 else None)
+            col_e3.metric("Avoided fuel cost (solar)", f"{total_solar_used * pellets_price:,.0f} €")
+            col_e4.metric("HP electricity cost",       f"{hp_cost:,.0f} €")
 
+            # Electric heater cost breakdown
+            if use_el and total_el_used > 0:
+                st.markdown("##### ⚡ Electric heater cost breakdown")
+                eb1, eb2, eb3, eb4, eb5 = st.columns(5)
+                eb1.metric("Heater active days",
+                           f"{el_days_active} / {el_days_total}",
+                           delta=f"spot < {el_threshold_ore} öre/kWh")
+                eb2.metric("Total el. consumed",   f"{total_el_used:,.0f} kWh")
+                eb3.metric(f"Spot cost (avg {avg_spot_ore:.0f} öre)",
+                           f"{el_spot_cost:,.0f} €")
+                eb4.metric(f"Tax ({el_energy_tax_ore:.1f}) + Transfer ({el_transfer_ore:.1f} öre)",
+                           f"{el_tax_cost + el_trans_cost:,.0f} €")
+                eb5.metric(f"Total el. cost  ({el_avg_total_ore:.0f} öre/kWh avg)",
+                           f"{el_total_cost:,.0f} €")
+
+            # ── Summary table ─────────────────────────────────────
+            st.markdown("#### 📋 Full System Summary")
+            summary_rows = {
+                "Item": [
+                    "Total drying demand",
+                    "  ☀️ Solar (direct + stored)",
+                    "  🔄 Heat pump contribution",
+                    "  ⚡ Electric heater contribution",
+                    "  💧 Water tank net discharge",
+                    "  🛢️ Oil tank net discharge",
+                    "Unmet deficit",
+                    "Overall coverage",
+                    "Reference cost (all pellets)",
+                    "  El. heater – spot cost",
+                    "  El. heater – energy tax",
+                    "  El. heater – transfer cost",
+                    "  Heat pump cost",
+                    "Total backup operating cost",
+                    "Net savings vs. reference",
+                ],
+                "Value": [
+                    f"{total_drying_kwh/1000:,.1f} MWh",
+                    f"{total_solar_used/1000:,.1f} MWh  ({total_solar_used/total_drying_kwh*100:.0f} %)" if total_drying_kwh > 0 else "–",
+                    f"{total_hp_used/1000:,.1f} MWh" if use_hp else "–",
+                    f"{total_el_used/1000:,.1f} MWh  ({el_days_active} days active)" if use_el else "–",
+                    f"{total_dis_w/1000:,.1f} MWh",
+                    f"{total_dis_o/1000:,.1f} MWh",
+                    f"{total_deficit/1000:,.1f} MWh  ({total_deficit/total_drying_kwh*100:.1f} %)" if total_drying_kwh > 0 else "–",
+                    f"{coverage_pct:.1f} %",
+                    f"{ref_cost:,.0f} €",
+                    f"{el_spot_cost:,.0f} €  (avg {avg_spot_ore:.0f} öre/kWh)" if use_el else "–",
+                    f"{el_tax_cost:,.0f} €  ({el_energy_tax_ore:.1f} öre/kWh)" if use_el else "–",
+                    f"{el_trans_cost:,.0f} €  ({el_transfer_ore:.1f} öre/kWh)" if use_el else "–",
+                    f"{hp_cost:,.0f} €" if use_hp else "–",
+                    f"{backup_cost:,.0f} €",
+                    f"{savings:,.0f} €",
+                ]
+            }
+            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+            # ── Monthly solar vs demand bar chart ─────────────────
+            st.markdown("#### 📊 Monthly Solar Heat vs. Drying Demand")
+            monthly_demand_kwh_per = total_drying_kwh / len(selected_months) if selected_months else 0
+            chart_df = pd.DataFrame({
+                "Month":                selected_months,
+                "Solar heat [kWh]":    [float(monthly_system_kwh[m]) for m in selected_months],
+                "Drying demand [kWh]": [monthly_demand_kwh_per] * len(selected_months),
+            })
+            st.bar_chart(chart_df.set_index("Month"), color=["#F4A300", "#2196F3"])
+
+
+    # ========================================
     # TAB 7: SPOT PRICES
     # ========================================
 
@@ -1731,8 +1374,6 @@ MONTHLY PRODUCTION (kWh)
                 try:
                     raw_df = _ingest_spot_csv(uploaded_spot)
                     st.session_state['spot_full_extended'] = raw_df
-                    # drying_spot_df will be derived from spot_full_extended by the grain drying tab
-                    st.session_state.pop('drying_spot_df', None)
                     st.session_state.pop('spot_live_extended_to', None)
                     _add_spot_log(f"Uploaded CSV: {len(raw_df):,} rows, {raw_df['Tid'].min().date()} → {raw_df['Tid'].max().date()}")
                     st.success(
@@ -1797,35 +1438,23 @@ MONTHLY PRODUCTION (kWh)
             load_btn   = st.button("📊 Show prices", type="primary", key="sp_load_btn", use_container_width=True)
             reload_btn = st.button("🔄 Re-extend live", key="sp_reload_btn", use_container_width=True)
 
-        if load_btn:
-            with st.spinner(f"Loading {sp_area} data…"):
-                sp_df = _load_preinstalled_spotprices(sp_area, sp_start, sp_end)
+        if load_btn or reload_btn:
+            with st.spinner(f"Preparing {sp_area} data…"):
+                sp_df = _load_preinstalled_spotprices(
+                    sp_area, sp_start, sp_end, force_reload=bool(reload_btn)
+                )
             if sp_df is not None and not sp_df.empty:
                 st.session_state["sp_loaded_df"]   = sp_df
                 st.session_state["sp_loaded_area"] = sp_area
-                st.session_state.pop('spot_live_fetch_error', None)
             else:
                 err = st.session_state.get('spot_load_error', 'No data found for selected area/period.')
                 st.warning(f"⚠️ {err}")
 
-        if reload_btn:
-            _cached_full = st.session_state.get('spot_full_extended')
-            if _cached_full is not None:
-                with st.spinner("Extending with live ENTSO-E data…"):
-                    extended = _extend_spot_with_live_data(_cached_full)
-                    st.session_state['spot_full_extended'] = extended
-                sp_df = _load_preinstalled_spotprices(sp_area, sp_start, sp_end)
-                if sp_df is not None and not sp_df.empty:
-                    st.session_state["sp_loaded_df"]   = sp_df
-                    st.session_state["sp_loaded_area"] = sp_area
-            else:
-                st.warning("Upload the CSV file first before re-extending.")
-
-        # Live-fetch status — only show if user explicitly tried re-extend
+        # Live-fetch status
         _spot_err  = st.session_state.get('spot_live_fetch_error')
         _spot_last = st.session_state.get('spot_live_extended_to', '—')
-        if reload_btn and _spot_err:
-            st.warning(f"⚠️ Live-extension failed: {_spot_err}")
+        if _spot_err:
+            st.warning(f"⚠️ Live-extension error: {_spot_err}  ·  Last successful: **{_spot_last}**")
         elif _spot_last != '—':
             st.caption(f"Live data extended to: **{_spot_last}**")
 
@@ -1847,42 +1476,24 @@ MONTHLY PRODUCTION (kWh)
             kc3.metric("Mean",    f"{prices_disp.mean():.3f} {currency}")
             kc4.metric("EUR/SEK", f"{eur_sek:.2f}")
 
-            import altair as alt
-
             st.markdown("##### Daily price gap (max − min per day)")
-            _pg  = sp_df_show.copy().reset_index(drop=True)
-            _pg["_dp"] = _pg["spotpris"].values * (1/eur_sek if show_eur else 1.0)
-            _pg["Day"] = pd.to_datetime(_pg["Tid"]).dt.date
-            _ds = _pg.groupby("Day")["_dp"].agg(["min","max"]).reset_index()
-            _ds["gap"] = (_ds["max"] - _ds["min"]).round(4)
-            _ds["Day"] = pd.to_datetime(_ds["Day"])
-            gap_chart = alt.Chart(_ds).mark_line(color="#2196F3").encode(
-                x=alt.X("Day:T", title="Date"),
-                y=alt.Y("gap:Q", title=f"Price gap [{currency}]"),
-                tooltip=[alt.Tooltip("Day:T", title="Date"),
-                         alt.Tooltip("gap:Q", title=f"Gap [{currency}]", format=".3f")]
-            ).properties(height=220)
-            st.altair_chart(gap_chart, use_container_width=True)
+            _pg  = sp_df_show.copy()
+            _pg["_dp"] = prices_disp.values
+            _pg["Day"] = _pg["Tid"].dt.date
+            _ds  = _pg.groupby("Day")["_dp"].agg(["min","max"])
+            _ds["gap"] = _ds["max"] - _ds["min"]
+            st.line_chart(_ds["gap"].rename(f"Price gap [{currency}]"))
             st.caption(
                 f"Average daily price gap: **{_ds['gap'].mean():.3f} {currency}**  ·  "
-                f"Max gap: **{_ds['gap'].max():.3f} {currency}** on {_ds.loc[_ds['gap'].idxmax(), 'Day'].date()}"
+                f"Max gap: **{_ds['gap'].max():.3f} {currency}** on {_ds['gap'].idxmax()}"
             )
 
             st.markdown("##### Monthly average spot price")
-            _mo = sp_df_show.copy().reset_index(drop=True)
-            _mo["_dp"]    = _mo["spotpris"].values * (1/eur_sek if show_eur else 1.0)
-            _mo["Period"] = pd.to_datetime(_mo["Tid"]).dt.to_period("M").astype(str)
-            _ma = _mo.groupby("Period")["_dp"].agg(["mean","min","max"]).reset_index()
-            _ma.columns = ["Period", "mean", "min", "max"]
-            bar_chart = alt.Chart(_ma).mark_bar(color="#F4A300").encode(
-                x=alt.X("Period:O", title="Month", sort=None),
-                y=alt.Y("mean:Q", title=f"Mean [{currency}]"),
-                tooltip=[alt.Tooltip("Period:O", title="Month"),
-                         alt.Tooltip("mean:Q", title=f"Mean [{currency}]", format=".3f"),
-                         alt.Tooltip("min:Q",  title=f"Min [{currency}]",  format=".3f"),
-                         alt.Tooltip("max:Q",  title=f"Max [{currency}]",  format=".3f")]
-            ).properties(height=220)
-            st.altair_chart(bar_chart, use_container_width=True)
+            _mo           = sp_df_show.copy()
+            _mo["_dp"]    = prices_disp.values
+            _mo["Period"] = _mo["Tid"].dt.to_period("M").astype(str)
+            _ma           = _mo.groupby("Period")["_dp"].agg(["mean","min","max"]).reset_index()
+            st.bar_chart(_ma.set_index("Period")["mean"].rename(f"Mean [{currency}]"))
 
             with st.expander("📋 Monthly data table"):
                 _ma.columns = ["Period", f"Mean {currency}", f"Min {currency}", f"Max {currency}"]
@@ -1928,10 +1539,12 @@ MONTHLY PRODUCTION (kWh)
             "shadow-free spacing and structural requirements."
         )
 
-        # ── LC24 HW physical dimensions (fixed product specs) ────────
-        # LC24 HW aperture: 24.7 m²  |  depth (N-S): ~5 m  |  width (E-W): ~5.0 m
-        UNIT_DEPTH_M  = 5.0   # N-S dimension (determines row pitch)
-        UNIT_WIDTH_M  = 5.0   # E-W dimension per unit
+        # ── LC20 physical dimensions (fixed product specs) ───────────
+        # LC20 active mirror area: 20 m²
+        # NOTE: physical footprint depth/width below are placeholders carried
+        # over from the previous unit — confirm the real LC20 footprint and update.
+        UNIT_DEPTH_M  = 5.0   # N-S dimension (determines row pitch) — CONFIRM for LC20
+        UNIT_WIDTH_M  = 5.0   # E-W dimension per unit — CONFIRM for LC20
 
         # Use unit count from sidebar — no duplication
         n_units = int(total_units) if total_units > 0 else 1
@@ -1945,12 +1558,11 @@ MONTHLY PRODUCTION (kWh)
                 f"from the sidebar. Only physical spacing is configured here."
             )
 
-            n_per_string_max     = max(1, n_units)
+            n_per_string_max = max(1, n_units)
             n_per_string_default = min(4, n_per_string_max)
-            n_per_string = st.number_input(
-                "Units per string (columns)", min_value=1,
-                max_value=n_per_string_max, value=n_per_string_default, step=1
-            )
+            n_per_string = st.slider("Units per string (columns)", min_value=1,
+                                     max_value=n_per_string_max,
+                                     value=n_per_string_default)
 
             spacing_factor = st.slider("Row spacing factor", min_value=1.0, max_value=3.0,
                                        value=1.5, step=0.1, key="fl_spacing",
@@ -1985,7 +1597,7 @@ MONTHLY PRODUCTION (kWh)
         field_depth_r  = round(field_depth / 0.5) * 0.5
 
         gross_footprint = field_width_r * field_depth_r
-        aperture_area   = n_units * APERTURE_24
+        aperture_area   = n_units * APERTURE_20
         gcr_pct         = aperture_area / gross_footprint * 100 if gross_footprint > 0 else 0
 
         with fl_col2:
@@ -2121,7 +1733,7 @@ MONTHLY PRODUCTION (kWh)
         st.markdown("#### 📏 Spacing & pitch details")
         detail_data = {
             "Parameter": [
-                "Unit aperture (LC24 HW)",
+                "Unit aperture (LC20)",
                 "Unit depth (N–S)",
                 "Unit width (E–W)",
                 "Row pitch (N–S, centre–centre)",
@@ -2134,7 +1746,7 @@ MONTHLY PRODUCTION (kWh)
                 "Total units",
             ],
             "Value": [
-                f"{APERTURE_24} m²",
+                f"{APERTURE_20} m²",
                 f"{UNIT_DEPTH_M} m",
                 f"{UNIT_WIDTH_M} m",
                 f"{row_pitch:.2f} m  ({spacing_factor:.1f}× depth)",
@@ -2152,7 +1764,7 @@ MONTHLY PRODUCTION (kWh)
         # ── Summary bar ───────────────────────────────────────────────
         st.markdown("---")
         st.info(
-            f"**{n_units} × LC24 HW** | {n_strings} parallel string{'s' if n_strings > 1 else ''} "
+            f"**{n_units} × LC20** | {n_strings} parallel string{'s' if n_strings > 1 else ''} "
             f"of {n_per_string} units in hydraulic series | "
             f"Row pitch: {row_pitch:.1f} m | Column pitch: {col_pitch:.1f} m | "
             f"Shadow-free above **{max(5, round(90 - math.degrees(math.atan(spacing_factor)), 0)):.0f}° solar elevation** | "
@@ -2164,4 +1776,4 @@ MONTHLY PRODUCTION (kWh)
                 pd.Timestamp.now().strftime("%Y-%m-%d %H:%M") + "*")
 
 else:
-    st.info("👆 Fetch DNI data from PVGIS above (enter coordinates + click Fetch), or upload a Global Solar Atlas Excel file.")
+    st.info("Upload a GSA Excel report file to continue.")
