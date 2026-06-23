@@ -1560,9 +1560,15 @@ MONTHLY PRODUCTION (kWh)
 
             n_per_string_max = max(1, n_units)
             n_per_string_default = min(4, n_per_string_max)
-            n_per_string = st.slider("Units per string (columns)", min_value=1,
-                                     max_value=n_per_string_max,
-                                     value=n_per_string_default)
+            if n_per_string_max > 1:
+                n_per_string = st.slider("Units per string (columns)", min_value=1,
+                                         max_value=n_per_string_max,
+                                         value=n_per_string_default)
+            else:
+                # A Streamlit slider requires min_value < max_value, so with a
+                # single unit we skip the slider and fix it at 1.
+                n_per_string = 1
+                st.caption("Units per string (columns): **1** (single unit)")
 
             spacing_factor = st.slider("Row spacing factor", min_value=1.0, max_value=3.0,
                                        value=1.5, step=0.1, key="fl_spacing",
