@@ -423,6 +423,19 @@ def fetch_smhi_history(hours_back: int) -> pd.DataFrame:
         return pd.DataFrame()
 
 # ── Helpers ───────────────────────────────────────────────────
+def naive_swe(s):
+    """Return timestamps as tz-naive Swedish local wall-clock for Plotly.
+
+    Data is stored in UTC. Plotly.js renders datetimes in UTC and ignores the
+    timezone offset, so a tz-aware timestamp would display 2h behind (the stored
+    UTC time). We convert to the site's local time (Örkelljunga / Europe/Stockholm)
+    and drop the tz, so Plotly shows the correct local wall-clock for every viewer
+    regardless of where they are. Safe on tz-naive input too."""
+    try:
+        return s.dt.tz_convert(SWE).dt.tz_localize(None)
+    except (TypeError, AttributeError):
+        return s  # already tz-naive
+
 def latest_val(df, sensor):
     sub = df[df["sensor"] == sensor]
     return float(sub["value"].iloc[-1]) if not sub.empty else None
@@ -852,65 +865,153 @@ with tab_live:
             e1.metric(T["energy_today_trap"], fmt(energy_today,3,"kWh"))
             e2.metric(T["heat_sensor_total"], fmt(mwh_to_kwh(v.get("heat_energy")),3,"kWh"))
 
-        # ── Sol & Effekt — idag vs igår (båda vyerna) ─────────
-        st.markdown('<div class="section-title">Sol & Effekt — idag vs igår</div>',
+        # ── Sol & Effekt — senaste två dagarna med data ───────
+        st.markdown('<div class="section-title">Sol & Effekt — senaste två dagarna</div>',
                     unsafe_allow_html=True)
-        df_48h = fetch_history(48)
-        if not df_48h.empty:
-            now_swe   = datetime.now(SWE)
-            today_d   = now_swe.date()
-            yest_d    = today_d - timedelta(days=1)
-
-            fig_cmp = go.Figure()
-            for sensor, color, name, yaxis in [
-                ("irradiance", AMBER, T["irr_lbl"],   "y"),
-                ("power",      RUST,  T["power_lbl"], "y2"),
-            ]:
-                sub = df_48h[df_48h["sensor"] == sensor].copy()
-                if sub.empty:
-                    continue
-                sub["swe"] = sub["created_at"].dt.tz_convert(SWE)
-                sub["date_d"] = sub["swe"].dt.date
-
-                for day, dash, opacity, suffix in [
-                    (today_d, "solid", 1.0,  f" — idag"),
-                    (yest_d,  "dot",   0.55, f" — igår"),
-                ]:
-                    day_sub = sub[sub["date_d"] == day].copy()
-                    if day_sub.empty:
-                        continue
-                    # Normalize x-axis to time-of-day so both days overlay
-                    day_sub["time_str"] = day_sub["swe"].dt.strftime("%H:%M")
-                    fig_cmp.add_trace(go.Scatter(
-                        x=day_sub["time_str"],
-                        y=day_sub["value"],
-                        name=f"{name}{suffix}",
-                        mode="lines",
-                        line=dict(width=1.8, color=color, dash=dash),
-                        opacity=opacity,
-                        yaxis=yaxis,
-                        hovertemplate=f"<b>%{{x}}</b><br>%{{y:.1f}}<extra>{name}{suffix}</extra>",
-                    ))
-
-            fig_cmp.update_layout(
-                height=300, margin=dict(l=0, r=70, t=10, b=0),
-                hovermode="x unified",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                            font=dict(size=10, color=MUTED, family="Inter")),
-                xaxis=dict(showgrid=False, color=MUTED, tickfont=dict(size=10)),
-                yaxis=dict(title=dict(text="W/m²", font=dict(color=AMBER)),
-                           tickfont=dict(color=AMBER), gridcolor=BORDER),
-                yaxis2=dict(title=dict(text="kW", font=dict(color=RUST)),
-                            tickfont=dict(color=RUST), overlaying="y",
-                            side="right", showgrid=False),
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                font=dict(color=MUTED, family="Inter"),
-            )
-            st.plotly_chart(fig_cmp, use_container_width=True,
-                            config={"scrollZoom": True, "displayModeBar": True,
-                                    "modeBarButtonsToRemove": ["select2d","lasso2d","autoScale2d"]})
+        df_48h = fetch_history(168)  # 7 dagar — hittar senaste dagarna oavsett gap
+        if df_48h.empty:
+            st.caption("Ingen data i databasen.")
         else:
-            st.caption("Ingen data tillgänglig.")
+            df_48h["swe"] = df_48h["created_at"].dt.tz_convert(SWE)
+            df_48h["date_d"] = df_48h["swe"].dt.date
+            # Hitta de två senaste dagarna som faktiskt har data
+            available_days = sorted(df_48h["date_d"].unique(), reverse=True)
+            if len(available_days) == 0:
+                st.caption("Ingen data tillgänglig.")
+            else:
+                day_a = available_days[0]                                  # senaste
+                day_b = available_days[1] if len(available_days) > 1 else None  # näst senaste
+                label_a = "Idag" if day_a == datetime.now(SWE).date() else str(day_a)
+                label_b = ("Igår" if day_b and day_b == datetime.now(SWE).date() - timedelta(days=1)
+                           else str(day_b)) if day_b else None
+
+                fig_cmp = go.Figure()
+                has_traces = False
+                for sensor, color, name, yaxis in [
+                    ("irradiance", AMBER, T["irr_lbl"],   "y"),
+                    ("power",      RUST,  T["power_lbl"], "y2"),
+                ]:
+                    sub = df_48h[df_48h["sensor"] == sensor].copy()
+                    if sub.empty:
+                        continue
+                    for day, dash, opacity, lbl in [
+                        (day_a, "solid", 1.0,  label_a),
+                        (day_b, "dot",   0.5,  label_b),
+                    ]:
+                        if day is None:
+                            continue
+                        day_sub = sub[sub["date_d"] == day].copy()
+                        if day_sub.empty:
+                            continue
+                        day_sub["time_str"] = day_sub["swe"].dt.strftime("%H:%M")
+                        fig_cmp.add_trace(go.Scatter(
+                            x=day_sub["time_str"], y=day_sub["value"],
+                            name=f"{name} — {lbl}", mode="lines",
+                            line=dict(width=1.8, color=color, dash=dash),
+                            opacity=opacity, yaxis=yaxis,
+                            hovertemplate=f"<b>%{{x}}</b><br>%{{y:.1f}}<extra>{name} {lbl}</extra>",
+                        ))
+                        has_traces = True
+
+                if has_traces:
+                    fig_cmp.update_layout(
+                        height=300, margin=dict(l=0, r=70, t=10, b=0),
+                        hovermode="x unified",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                    font=dict(size=10, color=MUTED, family="Inter")),
+                        xaxis=dict(showgrid=False, color=MUTED, tickfont=dict(size=10)),
+                        yaxis=dict(title=dict(text="W/m²", font=dict(color=AMBER)),
+                                   tickfont=dict(color=AMBER), gridcolor=BORDER),
+                        yaxis2=dict(title=dict(text="kW", font=dict(color=RUST)),
+                                    tickfont=dict(color=RUST), overlaying="y",
+                                    side="right", showgrid=False),
+                        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color=MUTED, family="Inter"),
+                    )
+                    st.plotly_chart(fig_cmp, use_container_width=True,
+                                    config={"scrollZoom": True, "displayModeBar": True,
+                                            "modeBarButtonsToRemove": ["select2d","lasso2d","autoScale2d"]})
+                else:
+                    st.caption(f"Data finns men inga irradiance/power-värden för {label_a} eller {label_b}.")
+
+        # ── Senaste dygnet — temperaturer, ΔT, flöde & tryck (24h) ──
+        # Kontinuerlig tidslinje för alla övriga värden. Lokal tid (naive_swe).
+        st.markdown('<div class="section-title">Senaste dygnet — temperaturer & system</div>',
+                    unsafe_allow_html=True)
+        if df_48h.empty:
+            st.caption("Ingen data i databasen.")
+        else:
+            cutoff24 = datetime.now(timezone.utc) - timedelta(hours=24)
+            df_24 = df_48h[df_48h["created_at"] >= cutoff24].copy()
+            if df_24.empty:
+                st.caption("Ingen data senaste dygnet.")
+            else:
+                # Chart 1 — Temperaturer
+                temp_names = {"temp_right_coll":T["collector_r"],"temp_left_coll":T["collector_l"],
+                              "temp_forward":T["forward"],"temp_return":T["return"],"temp_tank":T["tank"]}
+                temp_cmap  = {"temp_right_coll":RUST,"temp_left_coll":AMBER,"temp_forward":"#C1440E",
+                              "temp_return":SLATE,"temp_tank":TEAL}
+                fig24_t = go.Figure()
+                for s in ["temp_right_coll","temp_left_coll","temp_forward","temp_return","temp_tank"]:
+                    sub = df_24[df_24["sensor"] == s]
+                    if not sub.empty:
+                        fig24_t.add_trace(go.Scatter(
+                            x=naive_swe(sub["created_at"]), y=sub["value"],
+                            name=temp_names[s], mode="lines",
+                            line=dict(width=1.6, color=temp_cmap[s])))
+                fig24_t.update_layout(
+                    height=260, margin=dict(l=0, r=0, t=10, b=0), hovermode="x unified",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                font=dict(size=10, color=MUTED, family="Inter")),
+                    yaxis=dict(title=dict(text="°C", font=dict(color=TEXT)),
+                               tickfont=dict(color=TEXT), gridcolor=BORDER),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color=MUTED, family="Inter"))
+                fig24_t.update_xaxes(showgrid=False, color=MUTED)
+                st.markdown(f"<div style='font-size:.72rem;font-weight:600;color:{MUTED};"
+                            f"text-transform:uppercase;letter-spacing:.08em;margin:4px 0'>"
+                            f"{T['temperatures']}</div>", unsafe_allow_html=True)
+                st.plotly_chart(fig24_t, use_container_width=True,
+                                config={"displayModeBar": False}, key="live24_temp")
+
+                # Chart 2 — ΔT, Flöde & Tryck
+                fig24_d = go.Figure()
+                sub_dt = df_24[df_24["sensor"] == "temp_difference"]
+                if not sub_dt.empty:
+                    fig24_d.add_trace(go.Scatter(
+                        x=naive_swe(sub_dt["created_at"]), y=sub_dt["value"],
+                        name="ΔT (°C)", mode="lines", line=dict(width=1.6, color=TEXT), yaxis="y"))
+                sub_fl = df_24[df_24["sensor"] == "flow"]
+                if not sub_fl.empty:
+                    fig24_d.add_trace(go.Scatter(
+                        x=naive_swe(sub_fl["created_at"]), y=sub_fl["value"],
+                        name=T["flow_lbl"], mode="lines", line=dict(width=1.6, color=SLATE), yaxis="y2"))
+                sub_pr = df_24[df_24["sensor"] == "pressure"]
+                if not sub_pr.empty:
+                    fig24_d.add_trace(go.Scatter(
+                        x=naive_swe(sub_pr["created_at"]), y=sub_pr["value"],
+                        name=T["pressure_lbl"], mode="lines",
+                        line=dict(width=1.5, color=TEAL, dash="dot"), yaxis="y3"))
+                fig24_d.update_layout(
+                    height=240, margin=dict(l=0, r=90, t=10, b=0), hovermode="x unified",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                font=dict(size=10, color=MUTED, family="Inter")),
+                    yaxis=dict(title=dict(text="°C", font=dict(color=TEXT)),
+                               tickfont=dict(color=TEXT), gridcolor=BORDER),
+                    yaxis2=dict(title=dict(text="m³/h", font=dict(color=SLATE)),
+                                tickfont=dict(color=SLATE), overlaying="y", side="right",
+                                showgrid=False, anchor="x"),
+                    yaxis3=dict(title=dict(text="bar", font=dict(color=TEAL)),
+                                tickfont=dict(color=TEAL), overlaying="y", side="right",
+                                showgrid=False, anchor="free", position=1.0, range=[0, 8]),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color=MUTED, family="Inter"))
+                fig24_d.update_xaxes(showgrid=False, color=MUTED)
+                st.markdown(f"<div style='font-size:.72rem;font-weight:600;color:{MUTED};"
+                            f"text-transform:uppercase;letter-spacing:.08em;margin:10px 0 4px'>"
+                            f"{T['section_dt_flow']}</div>", unsafe_allow_html=True)
+                st.plotly_chart(fig24_d, use_container_width=True,
+                                config={"displayModeBar": False}, key="live24_dtflow")
 
     live_dashboard()
 
@@ -975,6 +1076,16 @@ with tab_hist:
     with st.spinner(T["loading_hist"]):
         df_hist   = fetch_history_range(dt_from, dt_to)
         df_smhi_h = fetch_smhi_history(hours_back)
+
+    # Data lagras i UTC. Plotly ritar datum i UTC och struntar i tidszons-offset,
+    # så vi konverterar till platsens lokala tid (Örkelljunga) och tar bort tz —
+    # då visar alla grafer nedan lokal tid. Varje graf läser från dessa två frames.
+    if not df_hist.empty:
+        df_hist = df_hist.copy()
+        df_hist["created_at"] = naive_swe(df_hist["created_at"])
+    if not df_smhi_h.empty:
+        df_smhi_h = df_smhi_h.copy()
+        df_smhi_h["created_at"] = naive_swe(df_smhi_h["created_at"])
 
     if df_hist.empty:
         st.warning(T["no_data_interval"])
